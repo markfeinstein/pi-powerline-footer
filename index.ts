@@ -6,8 +6,8 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { isKeyRelease, matchesKey, type AutocompleteProvider, type SelectItem, SelectList, truncateToWidth, TUI_KEYBINDINGS, visibleWidth } from "@earendil-works/pi-tui";
-import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync } from "node:fs";
-import { join, dirname } from "node:path";
+import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, lstatSync, statSync, renameSync, unlinkSync } from "node:fs";
+import { join, dirname, basename } from "node:path";
 import { homedir } from "node:os";
 
 import type { ColorScheme, SegmentContext, StatusLinePreset, StatusLineSegmentId } from "./types.ts";
@@ -25,18 +25,22 @@ import { ManagedShellSession } from "./bash-mode/shell-session.ts";
 import { matchHistoryEntries, readGlobalShellHistory, readProjectHistory, appendProjectHistory } from "./bash-mode/history.ts";
 import type { BashModeSettings } from "./bash-mode/types.ts";
 import { getPreset, PRESETS } from "./presets.ts";
-import { collectHiddenExtensionStatusKeys, getNotificationExtensionStatuses, mergeSegmentOptions, mergeSegmentsWithCustomItems, nextPowerlineSettingWithOptions, nextPowerlineSettingWithPreset, parsePowerlineConfig } from "./powerline-config.ts";
+import { collectHiddenExtensionStatusKeys, getNotificationExtensionStatuses, mergeSegmentOptions, mergeSegmentsWithCustomItems, nextPowerlineSettingWithOptions, nextPowerlineSettingWithPreset, parsePowerlineConfig, applyCustomLayout } from "./powerline-config.ts";
 import { getSeparator } from "./separators.ts";
 import { renderSegment } from "./segments.ts";
 import { getGitStatus, invalidateGitStatus, invalidateGitBranch } from "./git-status.ts";
 import { ansi, getFgAnsiCode } from "./colors.ts";
+import { wrapInPillGroup, buildPillUnits } from "./pills.ts";
+import { joinLeftRight } from "./layout.ts";
+import { setNerdFontsPreference } from "./icons.ts";
 import { WelcomeComponent, WelcomeHeader, discoverLoadedCounts, getRecentSessions } from "./welcome.ts";
 import { createWelcomeDismissScheduler } from "./welcome-dismiss.ts";
 import { createRenderScheduler } from "./render-scheduler.ts";
 import { readCoreContextUsage } from "./context-usage.ts";
-import { renderFixedEditorCluster } from "./fixed-editor/cluster.ts";
+import { renderFixedEditorCluster, reserveSpinnerSlot, keepSpinnerGlyph, SPINNER_SLOT_RESERVE } from "./fixed-editor/cluster.ts";
 import { emergencyTerminalModeReset, TerminalSplitCompositor } from "./fixed-editor/terminal-split.ts";
-import { getDefaultColors } from "./theme.ts";
+import { fg, rainbow, getDefaultColors } from "./theme.ts";
+import { projectStorageKey } from "./project-key.ts";
 import {
   isSupportedSuperShortcut,
   matchesConfiguredShortcut,
@@ -58,6 +62,7 @@ import {
   hasVibeFile,
   getVibeFileCount,
   generateVibesBatch,
+  parseVibeGenerateArgs,
 } from "./working-vibes.ts";
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -111,6 +116,8 @@ type PowerlineShortcutAction =
 
 const STASH_HISTORY_LIMIT = 12;
 const PROJECT_PROMPT_HISTORY_LIMIT = 50;
+const PROJECT_PROMPT_HISTORY_MAX_FILES = 200;
+const PROJECT_PROMPT_HISTORY_MAX_FILE_BYTES = 2 * 1024 * 1024;
 const STASH_PREVIEW_WIDTH = 72;
 const DEFAULT_SHORTCUTS: PowerlineShortcuts = {
   stashHistory: "ctrl+alt+h",
@@ -227,6 +234,16 @@ const PROMPT_HISTORY_STATE_KEY = Symbol.for("powerlinePromptHistoryState");
 type PromptHistoryState = { savedPromptHistory: string[] };
 type SessionAssistantUsage = AssistantMessage["usage"];
 
+const visibleWidthCache = new Map<string, number>();
+function measureVisibleWidth(value: string): number {
+  const cached = visibleWidthCache.get(value);
+  if (cached !== undefined) return cached;
+  const measured = visibleWidth(value);
+  if (visibleWidthCache.size >= 512) visibleWidthCache.clear();
+  visibleWidthCache.set(value, measured);
+  return measured;
+}
+
 function getUsageTokenTotal(usage: SessionAssistantUsage): number {
   const totalTokens = "totalTokens" in usage && typeof usage.totalTokens === "number" ? usage.totalTokens : 0;
   return totalTokens || usage.input + usage.output + usage.cacheRead + usage.cacheWrite;
@@ -292,9 +309,13 @@ function readPromptHistory(editor: any): string[] {
 
 function snapshotPromptHistory(editor: any): void {
   const history = readPromptHistory(editor);
+  const state = getPromptHistoryState();
   if (history.length > 0) {
-    getPromptHistoryState().savedPromptHistory = [...history];
+    state.savedPromptHistory = [...history];
+    return;
   }
+
+  state.savedPromptHistory = [];
 }
 
 function restorePromptHistory(editor: any): void {
@@ -341,10 +362,16 @@ function getCustomCompactionExtensionPath(): string {
   return join(homeDir, ".pi", "agent", "extensions", "pi-custom-compaction");
 }
 
+const UNSAFE_SETTINGS_MERGE_KEYS = new Set(["__proto__", "constructor", "prototype"]);
+
 function mergeSettings(base: Record<string, unknown>, override: Record<string, unknown>): Record<string, unknown> {
   const merged: Record<string, unknown> = { ...base };
 
   for (const [key, overrideValue] of Object.entries(override)) {
+    if (UNSAFE_SETTINGS_MERGE_KEYS.has(key)) {
+      continue;
+    }
+
     const baseValue = merged[key];
     merged[key] = isRecord(baseValue) && isRecord(overrideValue)
       ? mergeSettings(baseValue, overrideValue)
@@ -354,9 +381,18 @@ function mergeSettings(base: Record<string, unknown>, override: Record<string, u
   return merged;
 }
 
+const MAX_SETTINGS_FILE_BYTES = 256 * 1024;
+const MAX_COMPACTION_POLICY_FILE_BYTES = 64 * 1024;
+
 function readSettingsFile(settingsPath: string): Record<string, unknown> {
   try {
     if (!existsSync(settingsPath)) {
+      return {};
+    }
+
+    const stats = statSync(settingsPath);
+    if (!stats.isFile() || stats.size > MAX_SETTINGS_FILE_BYTES) {
+      console.debug(`[powerline-footer] Ignoring unsafe settings path at ${settingsPath}`);
       return {};
     }
 
@@ -375,12 +411,18 @@ function readSettingsFile(settingsPath: string): Record<string, unknown> {
   }
 }
 
-function readWritableSettingsFile(settingsPath: string): Record<string, unknown> | null {
-  if (!existsSync(settingsPath)) {
-    return {};
-  }
-
+function readWritableSettingsFile(settingsPath: string, options: { refuseSymlink?: boolean } = {}): Record<string, unknown> | null {
   try {
+    const stats = options.refuseSymlink ? lstatSync(settingsPath) : null;
+    if (stats && !stats.isFile()) {
+      console.debug(`[powerline-footer] Refusing to write settings to non-file path at ${settingsPath}`);
+      return null;
+    }
+    if (stats && stats.size > MAX_SETTINGS_FILE_BYTES) {
+      console.debug(`[powerline-footer] Refusing to write settings to oversized file at ${settingsPath}`);
+      return null;
+    }
+
     const parsed = JSON.parse(readFileSync(settingsPath, "utf-8"));
     if (!isRecord(parsed)) {
       console.debug(`[powerline-footer] Refusing to write settings to non-object file at ${settingsPath}`);
@@ -389,6 +431,10 @@ function readWritableSettingsFile(settingsPath: string): Record<string, unknown>
 
     return parsed;
   } catch (error) {
+    if (isFileNotFoundError(error)) {
+      return {};
+    }
+
     // Do not overwrite malformed user settings with partial data. Surface the failure
     // through the command handler so the user can fix the file intentionally.
     console.debug(`[powerline-footer] Failed to parse settings at ${settingsPath}:`, error);
@@ -396,15 +442,76 @@ function readWritableSettingsFile(settingsPath: string): Record<string, unknown>
   }
 }
 
-function readCompactionPolicyEnabled(configPath: string): boolean | undefined {
-  if (!existsSync(configPath)) return undefined;
+function pathExistsOrIsDanglingSymlink(filePath: string): boolean {
   try {
+    lstatSync(filePath);
+    return true;
+  } catch (error) {
+    return !isFileNotFoundError(error);
+  }
+}
+
+function isFileNotFoundError(error: unknown): boolean {
+  return isRecord(error) && error.code === "ENOENT";
+}
+
+function isSafeWritableDirectoryPath(dirPath: string): boolean {
+  try {
+    const stats = lstatSync(dirPath);
+    return stats.isDirectory();
+  } catch (error) {
+    return isFileNotFoundError(error);
+  }
+}
+
+function canWriteSettingsPath(settingsPath: string): boolean {
+  const settingsDir = dirname(settingsPath);
+  return isSafeWritableDirectoryPath(dirname(settingsDir)) && isSafeWritableDirectoryPath(settingsDir);
+}
+
+function canWritePowerlineStatePath(filePath: string): boolean {
+  const stateDir = dirname(filePath);
+  const powerlineDir = dirname(stateDir);
+  const agentDir = dirname(powerlineDir);
+  const piDir = dirname(agentDir);
+
+  if (![piDir, agentDir, powerlineDir, stateDir].every(isSafeWritableDirectoryPath)) {
+    return false;
+  }
+
+  if (!pathExistsOrIsDanglingSymlink(filePath)) {
+    return true;
+  }
+
+  try {
+    return lstatSync(filePath).isFile();
+  } catch {
+    return false;
+  }
+}
+
+export function readCompactionPolicyEnabled(configPath: string): boolean | undefined {
+  try {
+    const stats = lstatSync(configPath);
+    const parentDir = dirname(configPath);
+    const parentStats = lstatSync(parentDir);
+    const piDir = dirname(parentDir);
+    const piDirStats = basename(parentDir) === "agent" && basename(piDir) === ".pi"
+      ? lstatSync(piDir)
+      : null;
+    if (!stats.isFile() || !parentStats.isDirectory() || (piDirStats !== null && !piDirStats.isDirectory()) || stats.size > MAX_COMPACTION_POLICY_FILE_BYTES) {
+      console.debug(`[powerline-footer] Ignoring unsafe compaction policy path at ${configPath}`);
+      return undefined;
+    }
+
     const parsed = JSON.parse(readFileSync(configPath, "utf-8"));
-    if (!isRecord(parsed) || typeof parsed.enabled !== "boolean") return false;
+    if (!isRecord(parsed) || typeof parsed.enabled !== "boolean") return undefined;
     return parsed.enabled;
   } catch (error) {
-    console.debug(`[powerline-footer] Failed to read compaction policy from ${configPath}:`, error);
-    return false;
+    if (!isFileNotFoundError(error)) {
+      console.debug(`[powerline-footer] Failed to read compaction policy from ${configPath}:`, error);
+    }
+    return undefined;
   }
 }
 
@@ -432,6 +539,10 @@ function getSessionsPath(): string {
 }
 
 function getProjectSessionsPath(cwd: string): string {
+  return join(getSessionsPath(), `--${projectStorageKey(cwd)}--`);
+}
+
+function getLegacyProjectSessionsPath(cwd: string): string {
   const projectKey = cwd
     .replace(/^[/\\]+|[/\\]+$/g, "")
     .replace(/[\\/]+/g, "-");
@@ -439,9 +550,14 @@ function getProjectSessionsPath(cwd: string): string {
   return join(getSessionsPath(), `--${projectKey}--`);
 }
 
-function getPromptHistoryText(content: unknown): string {
+function getProjectSessionsPaths(cwd: string): string[] {
+  const paths = [getProjectSessionsPath(cwd), getLegacyProjectSessionsPath(cwd)];
+  return Array.from(new Set(paths));
+}
+
+export function getPromptHistoryText(content: unknown): string {
   if (typeof content === "string") {
-    return content.replace(/\s+/g, " ").trim();
+    return content.trim();
   }
 
   if (!Array.isArray(content)) {
@@ -453,29 +569,56 @@ function getPromptHistoryText(content: unknown): string {
     if (!isRecord(block) || block.type !== "text" || typeof block.text !== "string") {
       continue;
     }
-    parts.push(block.text);
+    parts.push(block.text.trim());
   }
 
-  return parts.join("\n").replace(/\s+/g, " ").trim();
+  return parts.join("\n").trim();
 }
 
-function readRecentProjectPrompts(cwd: string, limit: number): string[] {
-  const sessionsPath = getProjectSessionsPath(cwd);
-  if (!existsSync(sessionsPath)) {
-    return [];
+export function readRecentProjectPrompts(cwd: string, limit: number): string[] {
+  const promptEntries: { text: string; timestamp: number }[] = [];
+  const sessionFiles: Array<{ filePath: string; mtimeMs: number }> = [];
+
+  for (const sessionsPath of getProjectSessionsPaths(cwd)) {
+    try {
+      if (!lstatSync(sessionsPath).isDirectory()) {
+        continue;
+      }
+
+      for (const fileName of readdirSync(sessionsPath)) {
+        if (!fileName.endsWith(".jsonl")) continue;
+        const filePath = join(sessionsPath, fileName);
+        const stats = lstatSync(filePath);
+        if (!stats.isFile() || stats.size > PROJECT_PROMPT_HISTORY_MAX_FILE_BYTES) {
+          continue;
+        }
+
+        sessionFiles.push({ filePath, mtimeMs: stats.mtimeMs });
+      }
+    } catch (error) {
+      if (!isFileNotFoundError(error)) {
+        console.debug(`[powerline-footer] Skipping unreadable session path ${sessionsPath}:`, error);
+      }
+    }
   }
 
-  const promptEntries: { text: string; timestamp: number }[] = [];
-  const fileNames = readdirSync(sessionsPath)
-    .filter((fileName) => fileName.endsWith(".jsonl"));
+  sessionFiles.sort((a, b) => b.mtimeMs - a.mtimeMs);
 
-  for (const fileName of fileNames) {
-    const filePath = join(sessionsPath, fileName);
-    const lines = readFileSync(filePath, "utf-8").split("\n");
+  for (const { filePath } of sessionFiles.slice(0, PROJECT_PROMPT_HISTORY_MAX_FILES)) {
+    let lines: string[];
+    try {
+      // Best-effort read: a session file collected during the lstat pass above can be
+      // deleted, truncated, or become unreadable before we read it here. Skip it rather
+      // than aborting prompt-history discovery for every remaining file.
+      lines = readFileSync(filePath, "utf-8").split("\n");
+    } catch (error) {
+      console.debug(`[powerline-footer] Skipping unreadable session file ${filePath}:`, error);
+      continue;
+    }
 
     for (let i = lines.length - 1; i >= 0; i--) {
       const line = lines[i];
-      if (!line || !line.includes('"type":"message"') || !line.includes('"role":"user"')) {
+      if (!line) {
         continue;
       }
 
@@ -483,8 +626,8 @@ function readRecentProjectPrompts(cwd: string, limit: number): string[] {
       try {
         entry = JSON.parse(line);
       } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        throw new Error(`Failed to parse session file ${filePath}: ${message}`, { cause: error });
+        console.debug(`[powerline-footer] Skipping malformed session line in ${filePath}:`, error);
+        continue;
       }
 
       if (!isRecord(entry) || entry.type !== "message" || !isRecord(entry.message) || entry.message.role !== "user") {
@@ -557,7 +700,7 @@ function readPersistedStashHistory(): string[] {
   const stashHistoryPath = getStashHistoryPath();
 
   try {
-    if (!existsSync(stashHistoryPath)) {
+    if (!canWritePowerlineStatePath(stashHistoryPath) || !lstatSync(stashHistoryPath).isFile()) {
       return [];
     }
 
@@ -569,8 +712,46 @@ function readPersistedStashHistory(): string[] {
 
     return normalizeStashHistoryEntries(parsed.history);
   } catch (error) {
-    console.debug(`[powerline-footer] Failed to read stash history from ${stashHistoryPath}:`, error);
+    if (!isFileNotFoundError(error)) {
+      console.debug(`[powerline-footer] Failed to read stash history from ${stashHistoryPath}:`, error);
+    }
     return [];
+  }
+}
+
+function atomicWritePowerlineFile(targetPath: string, contents: string, label: string): boolean {
+  let tempPath = "";
+  try {
+    mkdirSync(dirname(targetPath), { recursive: true });
+    tempPath = `${targetPath}.${process.pid}.${Date.now()}.tmp`;
+    writeFileSync(tempPath, contents, { flag: "wx" });
+    try {
+      if (lstatSync(targetPath).isSymbolicLink()) {
+        console.debug(`[powerline-footer] Refusing to replace symlinked ${label} at ${targetPath}`);
+        unlinkSync(tempPath);
+        tempPath = "";
+        return false;
+      }
+    } catch (error) {
+      if (!isFileNotFoundError(error)) {
+        unlinkSync(tempPath);
+        tempPath = "";
+        throw error;
+      }
+    }
+    renameSync(tempPath, targetPath);
+    tempPath = "";
+    return true;
+  } catch (error) {
+    if (tempPath) {
+      try {
+        unlinkSync(tempPath);
+      } catch {
+        // best effort cleanup
+      }
+    }
+    console.debug(`[powerline-footer] Failed to persist ${label} to ${targetPath}:`, error);
+    return false;
   }
 }
 
@@ -582,10 +763,16 @@ function persistStashHistory(history: string[]): void {
   };
 
   try {
-    mkdirSync(dirname(stashHistoryPath), { recursive: true });
-    writeFileSync(stashHistoryPath, JSON.stringify(payload, null, 2) + "\n");
+    if (!canWritePowerlineStatePath(stashHistoryPath)) {
+      console.debug(`[powerline-footer] Refusing to persist stash history through unsafe path ${stashHistoryPath}`);
+      return;
+    }
+
+    atomicWritePowerlineFile(stashHistoryPath, JSON.stringify(payload, null, 2) + "\n", "stash history");
   } catch (error) {
-    console.debug(`[powerline-footer] Failed to persist stash history to ${stashHistoryPath}:`, error);
+    if (!isFileNotFoundError(error)) {
+      console.debug(`[powerline-footer] Failed to persist stash history to ${stashHistoryPath}:`, error);
+    }
   }
 }
 
@@ -593,30 +780,37 @@ function readSettings(cwd: string = process.cwd()): Record<string, unknown> {
   return mergeSettings(readSettingsFile(getSettingsPath()), readSettingsFile(getProjectSettingsPath(cwd)));
 }
 
-function writePowerlineSetting(cwd: string, update: (existingPowerlineSetting: unknown) => unknown): boolean {
+export function writePowerlineSetting(cwd: string, update: (existingPowerlineSetting: unknown) => unknown): boolean {
   const globalSettingsPath = getSettingsPath();
   const projectSettingsPath = getProjectSettingsPath(cwd);
-  const globalSettings = readWritableSettingsFile(globalSettingsPath);
-  const projectSettings = readWritableSettingsFile(projectSettingsPath);
-
-  if (globalSettings === null || projectSettings === null) {
+  const hasProjectSettings = pathExistsOrIsDanglingSymlink(projectSettingsPath);
+  if ((hasProjectSettings && !canWriteSettingsPath(projectSettingsPath)) || (!hasProjectSettings && !canWriteSettingsPath(globalSettingsPath))) {
     return false;
   }
 
-  const writeToProject = Object.prototype.hasOwnProperty.call(projectSettings, "powerline");
+  const projectSettings = hasProjectSettings
+    ? readWritableSettingsFile(projectSettingsPath, { refuseSymlink: true })
+    : null;
+
+  if (hasProjectSettings && projectSettings === null) {
+    return false;
+  }
+
+  const globalSettings = hasProjectSettings
+    ? null
+    : readWritableSettingsFile(globalSettingsPath, { refuseSymlink: true });
+
+  const writeToProject = hasProjectSettings;
   const settingsPath = writeToProject ? projectSettingsPath : globalSettingsPath;
   const settings = writeToProject ? projectSettings : globalSettings;
 
-  settings.powerline = update(settings.powerline);
-
-  try {
-    mkdirSync(dirname(settingsPath), { recursive: true });
-    writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + "\n");
-    return true;
-  } catch (error) {
-    console.debug(`[powerline-footer] Failed to persist powerline setting to ${settingsPath}:`, error);
+  if (settings === null) {
     return false;
   }
+
+  settings.powerline = update(settings.powerline);
+
+  return atomicWritePowerlineFile(settingsPath, JSON.stringify(settings, null, 2) + "\n", "powerline setting");
 }
 
 function writePowerlinePresetSetting(preset: StatusLinePreset, cwd: string = process.cwd()): boolean {
@@ -862,19 +1056,106 @@ function renderSegmentWithWidth(
   if (!rendered.visible || !rendered.content) {
     return { content: "", width: 0, visible: false };
   }
-  return { content: rendered.content, width: visibleWidth(rendered.content), visible: true };
+  return { content: rendered.content, width: measureVisibleWidth(rendered.content), visible: true };
 }
 
 /** Build content string from pre-rendered parts */
 function buildContentFromParts(
-  parts: string[],
+  parts: { id: string; content: string }[],
   presetDef: ReturnType<typeof getPreset>
 ): string {
   if (parts.length === 0) return "";
+  if (config.pills) {
+    const units = buildPillUnits(parts, config.pillGroups, config.pillColors, config.pillBackground, config.pillTextColors, config.pillForeground);
+    return " " + units.map((u) => wrapInPillGroup(u, config.bold)).join(" ") + " ";
+  }
   const separatorDef = getSeparator(presetDef.separator);
   const sepAnsi = getFgAnsiCode("sep");
   const sep = separatorDef.left;
-  return " " + parts.join(` ${sepAnsi}${sep}${ansi.reset} `) + ansi.reset + " ";
+  return " " + parts.map((p) => p.content).join(` ${sepAnsi}${sep}${ansi.reset} `) + ansi.reset + " ";
+}
+
+type RenderedLayoutPart = { id: string; content: string; width: number };
+
+type ResponsiveCompactionStage = {
+  compactThinking?: boolean;
+  hideCache?: boolean;
+  hideSessionClock?: boolean;
+  hideTokenInOut?: boolean;
+  hideContextWindowSize?: boolean;
+};
+
+const RESPONSIVE_COMPACTION_STAGES: ResponsiveCompactionStage[] = [
+  {},
+  { compactThinking: true },
+  { compactThinking: true, hideCache: true },
+  { compactThinking: true, hideCache: true, hideSessionClock: true },
+  { compactThinking: true, hideCache: true, hideSessionClock: true, hideTokenInOut: true },
+  { compactThinking: true, hideCache: true, hideSessionClock: true, hideTokenInOut: true, hideContextWindowSize: true },
+];
+
+function getAbbreviatedThinkingLevel(level: string): string {
+  switch (level) {
+    case "minimal": return "min";
+    case "medium": return "med";
+    case "high": return "hi";
+    case "xhigh": return "xh";
+    default: return level;
+  }
+}
+
+function getThinkingSemantic(level: string): "thinking" | "thinkingMinimal" | "thinkingLow" | "thinkingMedium" {
+  if (level === "minimal") return "thinkingMinimal";
+  if (level === "low") return "thinkingLow";
+  if (level === "medium") return "thinkingMedium";
+  return "thinking";
+}
+
+function renderAbbreviatedThinking(ctx: SegmentContext): RenderedLayoutPart | null {
+  const level = ctx.thinkingLevel || "off";
+  const abbreviated = getAbbreviatedThinkingLevel(level);
+  if (abbreviated === level) return null;
+
+  const content = level === "high" || level === "xhigh"
+    ? rainbow(abbreviated)
+    : fg(ctx.theme, getThinkingSemantic(level), abbreviated, ctx.colors);
+  return { id: "thinking", content, width: measureVisibleWidth(content) };
+}
+
+function renderContextPercentOnly(ctx: SegmentContext): RenderedLayoutPart | null {
+  if (ctx.customCompactionEnabled) return null;
+  const pct = Math.round(ctx.contextPercent);
+  const text = `${pct}%${ctx.autoCompactEnabled ? " auto" : ""}`;
+  const semantic = ctx.contextPercent > 90 ? "contextError" : ctx.contextPercent > 70 ? "contextWarn" : "context";
+  const content = fg(ctx.theme, semantic, text, ctx.colors);
+  return { id: "context_pct", content, width: measureVisibleWidth(content) };
+}
+
+function applyResponsiveCompaction(
+  parts: readonly RenderedLayoutPart[],
+  stage: ResponsiveCompactionStage,
+  ctx: SegmentContext,
+): RenderedLayoutPart[] {
+  const compacted: RenderedLayoutPart[] = [];
+  for (const part of parts) {
+    if (stage.hideCache && (part.id === "cache_read" || part.id === "cache_write")) continue;
+    if (stage.hideSessionClock && part.id === "time_spent") continue;
+    if (stage.hideTokenInOut && (part.id === "token_in" || part.id === "token_out")) continue;
+    if (stage.hideContextWindowSize && part.id === "context_total") continue;
+
+    if (stage.compactThinking && part.id === "thinking") {
+      compacted.push(renderAbbreviatedThinking(ctx) ?? part);
+      continue;
+    }
+
+    if (stage.hideContextWindowSize && part.id === "context_pct") {
+      compacted.push(renderContextPercentOnly(ctx) ?? part);
+      continue;
+    }
+
+    compacted.push(part);
+  }
+  return compacted;
 }
 
 /**
@@ -888,23 +1169,61 @@ function computeResponsiveLayout(
   availableWidth: number
 ): { topContent: string; secondaryContent: string } {
   const separatorDef = getSeparator(presetDef.separator);
-  const sepWidth = visibleWidth(separatorDef.left) + 2; // separator + spaces around it
+  const sepWidth = measureVisibleWidth(separatorDef.left) + 2; // separator + spaces around it
+  // In pill mode each segment gains cap columns and usually a trailing spacer;
+  // some grouped continuation segments add a leading spacer while compact token,
+  // cache, git, and thinking segments omit their trailing spacer. Use a small
+  // conservative overhead so responsive packing does not overfill rows.
+  const pillsOn = config.pills;
+  const perSegOverhead = pillsOn ? 3 : 0;
+  const gapWidth = pillsOn ? 1 : sepWidth;
   
-  // Get all segments: primary first, then secondary
+  // Get all segments grouped by placement.
   const mergedSegments = mergeSegmentsWithCustomItems(presetDef, config.customItems);
-  const primaryIds = [...mergedSegments.leftSegments, ...mergedSegments.rightSegments];
-  const secondaryIds = mergedSegments.secondarySegments;
-  const allSegmentIds = [...primaryIds, ...secondaryIds];
-  
-  // Render all segments and get their widths
-  const renderedSegments: { content: string; width: number }[] = [];
-  for (const segId of allSegmentIds) {
-    const { content, width, visible } = renderSegmentWithWidth(segId, ctx);
-    if (visible) {
-      renderedSegments.push({ content, width });
+
+  // Render a group of segment ids, dropping hidden/empty ones.
+  const renderGroup = (ids: readonly StatusLineSegmentId[]): RenderedLayoutPart[] => {
+    const out: RenderedLayoutPart[] = [];
+    for (const segId of ids) {
+      const { content, width, visible } = renderSegmentWithWidth(segId, ctx);
+      if (visible) out.push({ id: segId, content, width });
+    }
+    return out;
+  };
+  const leftRendered = renderGroup(mergedSegments.leftSegments);
+  const rightRendered = renderGroup(mergedSegments.rightSegments);
+  const secondaryRendered = renderGroup(mergedSegments.secondarySegments);
+
+  // True left/right split: when right-side segments are configured and the left
+  // and right groups fit together on one row, render the left group flush-left
+  // and the right group flush-right. Secondary segments stay on the secondary
+  // row. If the two groups cannot fit side by side, fall through to the legacy
+  // responsive packing below so narrow terminals still degrade gracefully.
+  if (rightRendered.length > 0) {
+    // The fixed-editor bar reserves an inline working-status spinner slot at the
+    // start of the top line (see reserveSpinnerSlot), which adds net columns.
+    // Account for it here so the right group stays flush with the terminal edge
+    // instead of overflowing and wrapping the rightmost segment's glyphs.
+    const spinnerReserve = config.fixedEditor && config.inlineWorkingStatus ? SPINNER_SLOT_RESERVE : 0;
+    for (const stage of RESPONSIVE_COMPACTION_STAGES) {
+      const compactLeft = applyResponsiveCompaction(leftRendered, stage, ctx);
+      const compactRight = applyResponsiveCompaction(rightRendered, stage, ctx);
+      const leftContent = buildContentFromParts(compactLeft, presetDef);
+      const rightContent = buildContentFromParts(compactRight, presetDef);
+      const topContent = joinLeftRight(leftContent, rightContent, availableWidth - spinnerReserve);
+      if (topContent !== null) {
+        return {
+          topContent,
+          secondaryContent: buildContentFromParts(secondaryRendered, presetDef),
+        };
+      }
     }
   }
-  
+
+  // Legacy responsive packing: primary (left then right) then secondary, greedily
+  // packed into the top row with overflow flowing to the secondary row.
+  const renderedSegments = [...leftRendered, ...rightRendered, ...secondaryRendered];
+
   if (renderedSegments.length === 0) {
     return { topContent: "", secondaryContent: "" };
   }
@@ -913,15 +1232,15 @@ function computeResponsiveLayout(
   // Account for: leading space (1) + trailing space (1) = 2 chars overhead
   const baseOverhead = 2;
   let currentWidth = baseOverhead;
-  let topSegments: string[] = [];
-  let overflowSegments: { content: string; width: number }[] = [];
+  let topSegments: { id: string; content: string }[] = [];
+  let overflowSegments: { id: string; content: string; width: number }[] = [];
   let overflow = false;
   
   for (const seg of renderedSegments) {
-    const neededWidth = seg.width + (topSegments.length > 0 ? sepWidth : 0);
+    const neededWidth = seg.width + perSegOverhead + (topSegments.length > 0 ? gapWidth : 0);
     
     if (!overflow && currentWidth + neededWidth <= availableWidth) {
-      topSegments.push(seg.content);
+      topSegments.push({ id: seg.id, content: seg.content });
       currentWidth += neededWidth;
     } else {
       overflow = true;
@@ -932,12 +1251,12 @@ function computeResponsiveLayout(
   // Fit overflow segments into secondary row (same width constraint)
   // Stop at first non-fitting segment to preserve ordering
   let secondaryWidth = baseOverhead;
-  let secondarySegments: string[] = [];
+  let secondarySegments: { id: string; content: string }[] = [];
   
   for (const seg of overflowSegments) {
-    const neededWidth = seg.width + (secondarySegments.length > 0 ? sepWidth : 0);
+    const neededWidth = seg.width + perSegOverhead + (secondarySegments.length > 0 ? gapWidth : 0);
     if (secondaryWidth + neededWidth <= availableWidth) {
-      secondarySegments.push(seg.content);
+      secondarySegments.push({ id: seg.id, content: seg.content });
       secondaryWidth += neededWidth;
     } else {
       break;
@@ -957,6 +1276,7 @@ function computeResponsiveLayout(
 export default function powerlineFooter(pi: ExtensionAPI) {
   const startupSettings = readSettings();
   config = parsePowerlineConfig(startupSettings.powerline, PRESET_NAMES);
+  setNerdFontsPreference(config.nerdFonts);
   let resolvedShortcuts = resolveShortcutConfig(startupSettings);
   let bashModeSettings = parseBashModeSettings(startupSettings);
 
@@ -997,6 +1317,33 @@ export default function powerlineFooter(pi: ExtensionAPI) {
   let layoutDirty = true;
   let forceNextLayoutRecompute = false;
   let lastEditorInputAt = 0;
+  let cachedPresetKey: string | null = null;
+  let cachedPresetDef: ReturnType<typeof getPreset> | null = null;
+  let cachedSessionSummary: {
+    sessionId: string | null;
+    branchLength: number;
+    input: number;
+    output: number;
+    cacheRead: number;
+    cacheWrite: number;
+    cost: number;
+    lastAssistant: AssistantMessage | undefined;
+    thinkingLevelFromSession: string | null;
+  } | null = null;
+
+  const getResolvedPresetDef = () => {
+    const presetKey = config.preset === "custom" && config.custom
+      ? `custom:${config.custom.leftSegments?.join(",") ?? ""}|${config.custom.rightSegments?.join(",") ?? ""}|${config.custom.secondarySegments?.join(",") ?? ""}|${config.custom.separator ?? ""}`
+      : config.preset;
+
+    if (cachedPresetDef && cachedPresetKey === presetKey) {
+      return cachedPresetDef;
+    }
+
+    cachedPresetKey = presetKey;
+    cachedPresetDef = applyCustomLayout(getPreset(config.preset), config);
+    return cachedPresetDef;
+  };
 
   const getShellPath = () => process.env.SHELL || "/bin/sh";
   const getShellCwd = () => shellSession?.state.cwd ?? currentCtx?.cwd ?? process.cwd();
@@ -1019,6 +1366,15 @@ export default function powerlineFooter(pi: ExtensionAPI) {
   const resetLayoutCache = () => {
     lastLayoutResult = null;
     layoutDirty = true;
+  };
+
+  const resetPresetCache = () => {
+    cachedPresetKey = null;
+    cachedPresetDef = null;
+  };
+
+  const resetSessionSummaryCache = () => {
+    cachedSessionSummary = null;
   };
 
   const requestStatusRender = (delayMs?: number) => {
@@ -1224,6 +1580,9 @@ export default function powerlineFooter(pi: ExtensionAPI) {
     resolvedShortcuts = resolveShortcutConfig(settings);
     showLastPrompt = settings.showLastPrompt !== false;
     config = parsePowerlineConfig(settings.powerline, PRESET_NAMES);
+    resetPresetCache();
+    resetSessionSummaryCache();
+    setNerdFontsPreference(config.nerdFonts);
     stashedPromptHistory = readPersistedStashHistory();
     bashModeActive = false;
     bashTranscript = new BashTranscriptStore(bashModeSettings);
@@ -1392,6 +1751,7 @@ export default function powerlineFooter(pi: ExtensionAPI) {
 
   pi.on("turn_end", async (_event, ctx) => {
     currentCtx = ctx;
+    resetSessionSummaryCache();
     requestImmediateStatusRender({ deferDuringTyping: false });
   });
 
@@ -2009,17 +2369,13 @@ export default function powerlineFooter(pi: ExtensionAPI) {
       
       // /vibe generate <theme> [count] - generate vibes and save to file
       if (subcommand === "generate") {
-        const theme = parts[1];
-        const parsedCount = Number.parseInt(parts[2] ?? "", 10);
-        const count = Number.isFinite(parsedCount)
-          ? Math.min(Math.max(Math.floor(parsedCount), 1), 500)
-          : 100;
-
-        if (!theme) {
+        const parsed = parseVibeGenerateArgs(parts.slice(1));
+        if (!parsed) {
           ctx.ui.notify("Usage: /vibe generate <theme> [count]", "error");
           return;
         }
 
+        const { theme, count } = parsed;
         ctx.ui.notify(`Generating ${count} vibes for "${theme}"...`, "info");
 
         const result = await generateVibesBatch(theme, count);
@@ -2059,7 +2415,7 @@ export default function powerlineFooter(pi: ExtensionAPI) {
   });
 
   function buildSegmentContext(ctx: any, theme: Theme): SegmentContext {
-    const presetDef = getPreset(config.preset);
+    const presetDef = applyCustomLayout(getPreset(config.preset), config);
     const colors: ColorScheme = presetDef.colors ?? getDefaultColors();
 
     // Build usage stats and get thinking level from session
@@ -2067,33 +2423,48 @@ export default function powerlineFooter(pi: ExtensionAPI) {
     let lastAssistant: AssistantMessage | undefined;
     let thinkingLevelFromSession: string | null = null;
     
+    const sessionId = ctx.sessionManager?.getSessionId?.() ?? null;
     const sessionEvents = ctx.sessionManager?.getBranch?.() ?? [];
-    for (const e of sessionEvents) {
-      if (!isRecord(e)) {
-        continue;
+    const branchLength = sessionEvents.length;
+    if (cachedSessionSummary && cachedSessionSummary.sessionId === sessionId && cachedSessionSummary.branchLength === branchLength) {
+      ({ input, output, cacheRead, cacheWrite, cost, lastAssistant, thinkingLevelFromSession } = cachedSessionSummary);
+    } else {
+      const startIndex = cachedSessionSummary && cachedSessionSummary.sessionId === sessionId && branchLength >= cachedSessionSummary.branchLength
+        ? cachedSessionSummary.branchLength
+        : 0;
+      if (startIndex > 0 && cachedSessionSummary) {
+        ({ input, output, cacheRead, cacheWrite, cost, lastAssistant, thinkingLevelFromSession } = cachedSessionSummary);
       }
 
-      // Check for thinking level change entries
-      if (e.type === "thinking_level_change" && typeof e.thinkingLevel === "string") {
-        thinkingLevelFromSession = e.thinkingLevel;
+      for (let i = startIndex; i < branchLength; i++) {
+        const e = sessionEvents[i];
+        if (!isRecord(e)) {
+          continue;
+        }
+
+        if (e.type === "thinking_level_change" && typeof e.thinkingLevel === "string") {
+          thinkingLevelFromSession = e.thinkingLevel;
+        }
+
+        if (e.type !== "message" || !isSessionAssistantMessage(e.message)) {
+          continue;
+        }
+
+        const m = e.message;
+        if (m.stopReason === "error" || m.stopReason === "aborted") {
+          continue;
+        }
+        input += m.usage.input;
+        output += m.usage.output;
+        cacheRead += m.usage.cacheRead;
+        cacheWrite += m.usage.cacheWrite;
+        cost += m.usage.cost.total;
+        if (getUsageTokenTotal(m.usage) > 0) {
+          lastAssistant = m;
+        }
       }
 
-      if (e.type !== "message" || !isSessionAssistantMessage(e.message)) {
-        continue;
-      }
-
-      const m = e.message;
-      if (m.stopReason === "error" || m.stopReason === "aborted") {
-        continue;
-      }
-      input += m.usage.input;
-      output += m.usage.output;
-      cacheRead += m.usage.cacheRead;
-      cacheWrite += m.usage.cacheWrite;
-      cost += m.usage.cost.total;
-      if (getUsageTokenTotal(m.usage) > 0) {
-        lastAssistant = m;
-      }
+      cachedSessionSummary = { sessionId, branchLength, input, output, cacheRead, cacheWrite, cost, lastAssistant, thinkingLevelFromSession };
     }
 
     // Calculate context percentage.
@@ -2107,7 +2478,7 @@ export default function powerlineFooter(pi: ExtensionAPI) {
 
     // Get git status (cached)
     const gitBranch = footerDataRef?.getGitBranch() ?? null;
-    const gitStatus = getGitStatus(gitBranch, segmentOptions.git?.polling);
+    const gitStatus = getGitStatus(gitBranch, segmentOptions.git?.polling, ctx.cwd ?? process.cwd());
     const extensionStatuses = footerDataRef?.getExtensionStatuses() ?? new Map();
     const customItemsById = new Map(config.customItems.map((item) => [item.id, item]));
     const hiddenExtensionStatusKeys = collectHiddenExtensionStatusKeys(config.customItems);
@@ -2131,6 +2502,7 @@ export default function powerlineFooter(pi: ExtensionAPI) {
       customCompactionEnabled: customCompactionEnabled || extensionStatuses.has(CUSTOM_COMPACTION_STATUS_KEY),
       usingSubscription,
       sessionStartTime,
+      alwaysShowTokens: config.alwaysShowTokens,
       shellModeActive: bashModeActive,
       shellRunning: shellSession?.state.running ?? false,
       shellName: shellSession?.state.shellName ?? null,
@@ -2166,7 +2538,7 @@ export default function powerlineFooter(pi: ExtensionAPI) {
       }
     }
 
-    const presetDef = getPreset(config.preset);
+    const presetDef = getResolvedPresetDef();
     let segmentCtx: SegmentContext;
     try {
       segmentCtx = buildSegmentContext(currentCtx, theme);
@@ -2200,7 +2572,7 @@ export default function powerlineFooter(pi: ExtensionAPI) {
     const notifications: string[] = [];
     for (const value of getNotificationExtensionStatuses(statuses, hiddenExtensionStatusKeys)) {
       const lineContent = ` ${value}`;
-      if (visibleWidth(lineContent) <= width) {
+      if (measureVisibleWidth(lineContent) <= width) {
         notifications.push(lineContent);
       }
     }
@@ -2257,7 +2629,7 @@ export default function powerlineFooter(pi: ExtensionAPI) {
     if (bashModeActive || !showLastPrompt || !lastUserPrompt) return [];
 
     const prefix = ` ${getFgAnsiCode("sep")}↳${ansi.reset} `;
-    const availableWidth = width - visibleWidth(prefix);
+    const availableWidth = width - measureVisibleWidth(prefix);
     if (availableWidth < 10) return [];
 
     let promptText = lastUserPrompt.replace(/\s+/g, " ").trim();
@@ -2349,17 +2721,37 @@ export default function powerlineFooter(pi: ExtensionAPI) {
         const statusContainerLines = fixedStatusContainer
           ? compositor.renderHidden(fixedStatusContainer, width).filter((line) => visibleWidth(line) > 0)
           : [];
+        const workingStatusLines = config.hideWorkingMessage
+          ? statusContainerLines.map(keepSpinnerGlyph).filter((line) => visibleWidth(line) > 0)
+          : statusContainerLines;
         const aboveWidgetLines = fixedWidgetContainerAbove ? compositor.renderHidden(fixedWidgetContainerAbove, width) : [];
         const belowWidgetLines = fixedWidgetContainerBelow ? compositor.renderHidden(fixedWidgetContainerBelow, width) : [];
+
+        // When inlineWorkingStatus is set, fold the pi "Working…" status into the
+        // powerline bar line. A fixed-width spinner slot is always reserved at the
+        // start of the bar so the text doesn't shift when the spinner toggles.
+        const baseStatusLines = renderPowerlineStatusLines(width);
+        let topLines = renderPowerlineTopLines(width, theme);
+        // statusLines = [...renderPowerlineStatusLines(width), ...workingStatusLines]
+        let statusLines = [...baseStatusLines, ...workingStatusLines];
+        if (config.inlineWorkingStatus && topLines.length > 0) {
+          const spinner = workingStatusLines.length > 0 ? workingStatusLines.join(" ") : "";
+          topLines = [reserveSpinnerSlot(topLines[0], spinner), ...topLines.slice(1)];
+          statusLines = baseStatusLines;
+        }
+
         return renderFixedEditorCluster({
           width,
           terminalRows,
-          statusLines: [...aboveWidgetLines, ...renderPowerlineStatusLines(width), ...statusContainerLines],
-          topLines: renderPowerlineTopLines(width, theme),
+          statusLines,
+          topLines,
           editorLines: fixedEditorContainer ? compositor.renderHidden(fixedEditorContainer, width) : [],
           secondaryLines: [...renderPowerlineSecondaryLines(width, theme), ...belowWidgetLines],
           transcriptLines: renderBashTranscriptLines(width, theme),
           lastPromptLines: renderLastPromptLines(width),
+          aboveEditorWidgetLines: aboveWidgetLines,
+          statusPosition: config.statusBelowPrompt ? "below" : "above",
+          lastPromptPosition: config.lastPromptAboveInput ? "above" : "below",
         });
       },
     });

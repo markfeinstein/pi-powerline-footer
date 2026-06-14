@@ -91,6 +91,14 @@ export interface StatusLineSegmentOptions {
   time?: { format?: "12h" | "24h"; showSeconds?: boolean };
 }
 
+// User-defined layout for the `custom` preset (from settings.json `powerline.custom`)
+export interface CustomLayoutConfig {
+  leftSegments?: BuiltinStatusLineSegmentId[];
+  rightSegments?: BuiltinStatusLineSegmentId[];
+  secondarySegments?: BuiltinStatusLineSegmentId[];
+  separator?: StatusLineSeparatorStyle;
+}
+
 export type CustomItemPosition = "left" | "right" | "secondary";
 
 export interface CustomStatusItem {
@@ -159,6 +167,8 @@ export interface SegmentContext {
   customCompactionEnabled: boolean;
   usingSubscription: boolean;
   sessionStartTime: number;
+  /** Force the token in/out/cached segments to render even when the value is 0. */
+  alwaysShowTokens: boolean;
   shellModeActive: boolean;
   shellRunning: boolean;
   shellName: string | null;

@@ -1,10 +1,10 @@
-import { hostname as osHostname } from "node:os";
-import { basename } from "node:path";
-import { visibleWidth } from "@earendil-works/pi-tui";
+import { lstatSync, readFileSync } from "node:fs";
+import { homedir, hostname as osHostname } from "node:os";
+import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import type { BuiltinStatusLineSegmentId, RenderedSegment, SegmentContext, SemanticColor, StatusLineSegment, StatusLineSegmentId } from "./types.ts";
 import { normalizeCompactExtensionStatus, normalizeExtensionStatusValue } from "./powerline-config.ts";
 import { fg, rainbow, applyColor } from "./theme.ts";
-import { getIcons, SEP_DOT, getThinkingText } from "./icons.ts";
+import { getIcons, hasNerdFonts, SEP_DOT, getThinkingText } from "./icons.ts";
 
 function color(ctx: SegmentContext, semantic: SemanticColor, text: string): string {
   return fg(ctx.theme, semantic, text, ctx.colors);
@@ -34,6 +34,55 @@ function formatDuration(ms: number): string {
   if (hours > 0) return `${hours}h${minutes % 60}m`;
   if (minutes > 0) return `${minutes}m${seconds % 60}s`;
   return `${seconds}s`;
+}
+
+const MAX_GIT_FILE_BYTES = 4096;
+const BASENAME_PATH_CACHE_LIMIT = 200;
+const basenamePathCache = new Map<string, string>();
+
+function readLinkedWorktreeGitDir(cwd: string): string | null {
+  const gitFile = join(cwd, ".git");
+  try {
+    const stats = lstatSync(gitFile);
+    if (!stats.isFile() || stats.size > MAX_GIT_FILE_BYTES) return null;
+
+    const match = /^gitdir:\s*(.+)$/i.exec(readFileSync(gitFile, "utf-8").trim());
+    if (!match) return null;
+
+    const gitDir = match[1]!.trim();
+    return isAbsolute(gitDir) ? gitDir : resolve(cwd, gitDir);
+  } catch {
+    return null;
+  }
+}
+
+function repoNameFromWorktreeGitDir(gitDir: string): string | null {
+  const worktreesDir = dirname(gitDir);
+  if (basename(worktreesDir) !== "worktrees") return null;
+
+  const commonGitDir = dirname(worktreesDir);
+  const commonGitDirName = basename(commonGitDir);
+  if (commonGitDirName === ".git" || commonGitDirName === ".bare") {
+    return basename(dirname(commonGitDir)) || null;
+  }
+
+  return commonGitDirName.replace(/\.git$/, "") || null;
+}
+
+function formatBasenamePath(pwd: string): string {
+  const cached = basenamePathCache.get(pwd);
+  if (cached) return cached;
+
+  const currentName = basename(pwd) || pwd;
+  const gitDir = readLinkedWorktreeGitDir(pwd);
+  const repoName = gitDir ? repoNameFromWorktreeGitDir(gitDir) : null;
+  const formatted = repoName && repoName !== currentName ? `${repoName}/${currentName}` : currentName;
+
+  if (basenamePathCache.size >= BASENAME_PATH_CACHE_LIMIT) {
+    basenamePathCache.clear();
+  }
+  basenamePathCache.set(pwd, formatted);
+  return formatted;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -95,14 +144,14 @@ const pathSegment: StatusLineSegment = {
     const mode = opts.mode ?? "basename";
 
     let pwd = ctx.shellModeActive && ctx.shellCwd ? ctx.shellCwd : (ctx.cwd ?? process.cwd());
-    const home = process.env.HOME || process.env.USERPROFILE;
+    const home = process.env.HOME || process.env.USERPROFILE || homedir();
 
     if (mode === "basename") {
-      // Just the last directory component (cross-platform)
-      pwd = basename(pwd) || pwd;
+      // Show repo/worktree for linked worktree roots; otherwise just the last component.
+      pwd = formatBasenamePath(pwd);
     } else {
       // Abbreviate home directory for abbreviated/full modes
-      if (home && pwd.startsWith(home)) {
+      if (home && (pwd === home || pwd.startsWith(`${home}${sep}`))) {
         pwd = `~${pwd.slice(home.length)}`;
       }
 
@@ -115,7 +164,11 @@ const pathSegment: StatusLineSegment = {
       if (mode === "abbreviated") {
         const maxLen = opts.maxLength ?? 40;
         if (pwd.length > maxLen) {
-          pwd = `…${pwd.slice(-(maxLen - 1))}`;
+          if (maxLen <= 1) {
+            pwd = "…";
+          } else {
+            pwd = `…${pwd.slice(-(maxLen - 1))}`;
+          }
         }
       }
     }
@@ -182,16 +235,8 @@ const thinkingSegment: StatusLineSegment = {
   render(ctx) {
     const level = ctx.thinkingLevel || "off";
 
-    const levelText: Record<string, string> = {
-      off: "off",
-      minimal: "min",
-      low: "low",
-      medium: "med",
-      high: "high",
-      xhigh: "xhigh",
-    };
-    const label = levelText[level] || level;
-    const content = `think:${label}`;
+    // Full level name without an icon or "think:" prefix.
+    const content = level;
 
     if (level === "high" || level === "xhigh") {
       return { content: rainbow(content), visible: true };
@@ -226,7 +271,7 @@ const tokenInSegment: StatusLineSegment = {
   render(ctx) {
     const icons = getIcons();
     const { input } = ctx.usageStats;
-    if (!input) return { content: "", visible: false };
+    if (!input && !ctx.alwaysShowTokens) return { content: "", visible: false };
 
     const content = withIcon(icons.input, formatTokens(input));
     return { content: color(ctx, "tokens", content), visible: true };
@@ -238,7 +283,7 @@ const tokenOutSegment: StatusLineSegment = {
   render(ctx) {
     const icons = getIcons();
     const { output } = ctx.usageStats;
-    if (!output) return { content: "", visible: false };
+    if (!output && !ctx.alwaysShowTokens) return { content: "", visible: false };
 
     const content = withIcon(icons.output, formatTokens(output));
     return { content: color(ctx, "tokens", content), visible: true };
@@ -261,6 +306,7 @@ const tokenTotalSegment: StatusLineSegment = {
 const costSegment: StatusLineSegment = {
   id: "cost",
   render(ctx) {
+    const icons = getIcons();
     const { cost } = ctx.usageStats;
     const usingSubscription = ctx.usingSubscription;
 
@@ -268,7 +314,9 @@ const costSegment: StatusLineSegment = {
       return { content: "", visible: false };
     }
 
-    const costDisplay = usingSubscription ? "(sub)" : `$${cost.toFixed(2)}`;
+    const costDisplay = usingSubscription
+      ? (hasNerdFonts() ? icons.cost : "sub")
+      : `$${cost.toFixed(2)}`;
     return { content: color(ctx, "cost", costDisplay), visible: true };
   },
 };
@@ -283,7 +331,8 @@ const contextPctSegment: StatusLineSegment = {
     const window = ctx.contextWindow;
 
     const autoIcon = ctx.autoCompactEnabled && icons.auto ? ` ${icons.auto}` : "";
-    const text = `${pct.toFixed(1)}%/${formatTokens(window)}${autoIcon}`;
+    const roundedPct = Math.round(pct);
+    const text = `${roundedPct}%/${formatTokens(window)}${autoIcon}`;
 
     // Icon outside color, text inside - use semantic colors for thresholds
     let content: string;
@@ -376,10 +425,9 @@ const cacheReadSegment: StatusLineSegment = {
   render(ctx) {
     const icons = getIcons();
     const { cacheRead } = ctx.usageStats;
-    if (!cacheRead) return { content: "", visible: false };
+    if (!cacheRead && !ctx.alwaysShowTokens) return { content: "", visible: false };
 
-    const parts = [icons.cache, icons.input, formatTokens(cacheRead)].filter(Boolean);
-    const content = parts.join(" ");
+    const content = withIcon(icons.cache, formatTokens(cacheRead));
     return { content: color(ctx, "tokens", content), visible: true };
   },
 };
@@ -389,10 +437,9 @@ const cacheWriteSegment: StatusLineSegment = {
   render(ctx) {
     const icons = getIcons();
     const { cacheWrite } = ctx.usageStats;
-    if (!cacheWrite) return { content: "", visible: false };
+    if (!cacheWrite && !ctx.alwaysShowTokens) return { content: "", visible: false };
 
-    const parts = [icons.cache, icons.output, formatTokens(cacheWrite)].filter(Boolean);
-    const content = parts.join(" ");
+    const content = withIcon(icons.cache, formatTokens(cacheWrite));
     return { content: color(ctx, "tokens", content), visible: true };
   },
 };
