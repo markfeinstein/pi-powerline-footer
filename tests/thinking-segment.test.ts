@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { renderSegment } from "../segments.ts";
+import { getIcons } from "../icons.ts";
 import type { ColorScheme, SegmentContext, ThemeLike } from "../types.ts";
 
 function hexAnsi(hex: `#${string}`): string {
@@ -23,6 +24,7 @@ function createSegmentContext(thinkingLevel: string, colors: ColorScheme): Segme
     customCompactionEnabled: false,
     usingSubscription: false,
     sessionStartTime: Date.now(),
+    alwaysShowTokens: false,
     shellModeActive: false,
     shellRunning: false,
     shellName: null,
@@ -54,8 +56,10 @@ test("thinking segment uses per-level colors for off through medium", () => {
   const low = renderSegment("thinking", createSegmentContext("low", colors));
   const medium = renderSegment("thinking", createSegmentContext("medium", colors));
 
-  assert.equal(off.content, `${hexAnsi("#111111")}think:off\x1b[0m`);
-  assert.equal(minimal.content, `${hexAnsi("#222222")}think:min\x1b[0m`);
-  assert.equal(low.content, `${hexAnsi("#333333")}think:low\x1b[0m`);
-  assert.equal(medium.content, `${hexAnsi("#444444")}think:med\x1b[0m`);
+  const ic = getIcons().thinking;
+  const tag = (t: string) => (ic ? `${ic} ${t}` : t);
+  assert.equal(off.content, `${hexAnsi("#111111")}${tag("off")}\x1b[0m`);
+  assert.equal(minimal.content, `${hexAnsi("#222222")}${tag("minimal")}\x1b[0m`);
+  assert.equal(low.content, `${hexAnsi("#333333")}${tag("low")}\x1b[0m`);
+  assert.equal(medium.content, `${hexAnsi("#444444")}${tag("medium")}\x1b[0m`);
 });

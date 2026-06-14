@@ -35,4 +35,19 @@ test("readCoreContextUsage ignores unknown or unusable estimates", () => {
   assert.equal(readCoreContextUsage({ getContextUsage: () => undefined }), null);
   assert.equal(readCoreContextUsage({ getContextUsage: () => ({ tokens: null, contextWindow: 5000, percent: null }) }), null);
   assert.equal(readCoreContextUsage({ getContextUsage: () => ({ tokens: 100, contextWindow: 0, percent: 0 }) }), null);
+  assert.equal(readCoreContextUsage({ getContextUsage: () => { throw new Error("boom"); } }), null);
+  assert.equal(readCoreContextUsage(Object.defineProperty({}, "getContextUsage", {
+    get() {
+      throw new Error("getter boom");
+    },
+  })), null);
+  assert.equal(readCoreContextUsage({
+    getContextUsage() {
+      return Object.defineProperty({}, "tokens", {
+        get() {
+          throw new Error("tokens getter");
+        },
+      });
+    },
+  }), null);
 });

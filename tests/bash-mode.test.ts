@@ -1,9 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { appendProjectHistory, matchHistoryEntries, readGlobalShellHistory } from "../bash-mode/history.ts";
+import { appendProjectHistory, matchHistoryEntries, readGlobalShellHistory, readProjectHistory } from "../bash-mode/history.ts";
 import { BashTranscriptStore } from "../bash-mode/transcript.ts";
 import {
   BashAutocompleteProvider,
@@ -14,6 +15,9 @@ import {
 } from "../bash-mode/completion.ts";
 import { getIcons } from "../icons.ts";
 import { ManagedShellSession } from "../bash-mode/shell-session.ts";
+import { projectStorageKey } from "../project-key.ts";
+
+const indexSource = readFileSync(new URL("../index.ts", import.meta.url), "utf-8");
 
 function getMethod(target: object, name: string): Function {
   const method = Reflect.get(target, name);
@@ -21,6 +25,34 @@ function getMethod(target: object, name: string): Function {
     throw new Error(`Expected ${name} to be a function`);
   }
   return method;
+}
+
+function quoteForTestShell(value: string): string {
+  return `'${value.replace(/'/g, `'"'"'`)}'`;
+}
+
+function runGitForTest(cwd: string, args: string[]): void {
+  const result = spawnSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+}
+
+function setHistoryEnv(homeDir: string, histfile: string): () => void {
+  const originalHome = process.env.HOME;
+  const originalHistfile = process.env.HISTFILE;
+  process.env.HOME = homeDir;
+  process.env.HISTFILE = histfile;
+  return () => {
+    if (originalHome === undefined) {
+      delete process.env.HOME;
+    } else {
+      process.env.HOME = originalHome;
+    }
+    if (originalHistfile === undefined) {
+      delete process.env.HISTFILE;
+    } else {
+      process.env.HISTFILE = originalHistfile;
+    }
+  };
 }
 
 function ensureEditorModuleLinks(): { cleanup: () => void } {
@@ -59,7 +91,7 @@ function ensureEditorModuleLinks(): { cleanup: () => void } {
 test("project history is stored newest-first and global zsh history parses histfile format", () => {
   const cwd = mkdtempSync(join(tmpdir(), "powerline-history-"));
   const histfile = join(cwd, ".zsh_history");
-  process.env.HISTFILE = histfile;
+  const restoreEnv = setHistoryEnv(cwd, histfile);
 
   appendProjectHistory(cwd, "git status", cwd);
   appendProjectHistory(cwd, "git stash", cwd);
@@ -72,8 +104,216 @@ test("project history is stored newest-first and global zsh history parses histf
     "",
   ].join("\n"));
 
-  const global = readGlobalShellHistory("/bin/zsh");
-  assert.deepEqual(global, ["plain-command", "git pull", "git fetch"]);
+  try {
+    const global = readGlobalShellHistory("/bin/zsh");
+    assert.deepEqual(global, ["plain-command", "git pull", "git fetch"]);
+  } finally {
+    restoreEnv();
+  }
+});
+
+test("project history storage separates paths that shared the old slug", () => {
+  const originalHome = process.env.HOME;
+  const homeDir = mkdtempSync(join(tmpdir(), "powerline-history-home-"));
+  const root = mkdtempSync(join(tmpdir(), "powerline-history-collision-"));
+  const cwdA = join(root, "a-b");
+  const cwdB = join(root, "a", "b");
+
+  process.env.HOME = homeDir;
+  appendProjectHistory(cwdA, "git status", cwdA);
+  appendProjectHistory(cwdB, "git stash", cwdB);
+
+  try {
+    assert.deepEqual(readProjectHistory(cwdA).map((entry) => entry.command), ["git status"]);
+    assert.deepEqual(readProjectHistory(cwdB).map((entry) => entry.command), ["git stash"]);
+  } finally {
+    process.env.HOME = originalHome;
+  }
+});
+
+test("project history keeps zero timestamps", () => {
+  const originalHome = process.env.HOME;
+  const homeDir = mkdtempSync(join(tmpdir(), "powerline-history-zero-home-"));
+  const cwd = mkdtempSync(join(tmpdir(), "powerline-history-zero-"));
+  const historyDir = join(homeDir, ".pi", "agent", "powerline-footer", "bash-history");
+  const newPath = join(historyDir, `${projectStorageKey(cwd)}.json`);
+
+  process.env.HOME = homeDir;
+  mkdirSync(historyDir, { recursive: true });
+  writeFileSync(newPath, JSON.stringify({
+    version: 1,
+    entries: [{ command: "git pull", cwd, timestamp: 0 }],
+  }) + "\n");
+
+  try {
+    assert.deepEqual(readProjectHistory(cwd).map((entry) => entry.command), ["git pull"]);
+  } finally {
+    process.env.HOME = originalHome;
+  }
+});
+
+test("project history reads legacy slug files", () => {
+  const originalHome = process.env.HOME;
+  const homeDir = mkdtempSync(join(tmpdir(), "powerline-history-legacy-home-"));
+  const cwd = mkdtempSync(join(tmpdir(), "powerline-history-legacy-"));
+  const legacyKey = cwd.replace(/^[/\\]+|[/\\]+$/g, "").replace(/[\\/]+/g, "-") || "root";
+  const legacyPath = join(homeDir, ".pi", "agent", "powerline-footer", "bash-history", `${legacyKey}.json`);
+
+  process.env.HOME = homeDir;
+  mkdirSync(join(homeDir, ".pi", "agent", "powerline-footer", "bash-history"), { recursive: true });
+  writeFileSync(legacyPath, JSON.stringify({
+    version: 1,
+    entries: [{ command: "git pull", cwd, timestamp: 123 }],
+  }) + "\n");
+
+  try {
+    assert.deepEqual(readProjectHistory(cwd).map((entry) => entry.command), ["git pull"]);
+  } finally {
+    process.env.HOME = originalHome;
+  }
+});
+
+test("project history merges valid new and legacy files", () => {
+  const originalHome = process.env.HOME;
+  const homeDir = mkdtempSync(join(tmpdir(), "powerline-history-merge-home-"));
+  const cwd = mkdtempSync(join(tmpdir(), "powerline-history-merge-"));
+  const historyDir = join(homeDir, ".pi", "agent", "powerline-footer", "bash-history");
+  const legacyKey = cwd.replace(/^[/\\]+|[/\\]+$/g, "").replace(/[\\/]+/g, "-") || "root";
+  const legacyPath = join(historyDir, `${legacyKey}.json`);
+
+  process.env.HOME = homeDir;
+  mkdirSync(historyDir, { recursive: true });
+  writeFileSync(legacyPath, JSON.stringify({
+    version: 1,
+    entries: [
+      { command: "git pull", cwd, timestamp: 100 },
+      { command: "git status", cwd, timestamp: 90 },
+    ],
+  }) + "\n");
+  appendProjectHistory(cwd, "git status", cwd);
+
+  try {
+    assert.deepEqual(readProjectHistory(cwd).map((entry) => entry.command), ["git status", "git pull"]);
+  } finally {
+    process.env.HOME = originalHome;
+  }
+});
+
+test("project history falls back to legacy files when new file is malformed", () => {
+  const originalHome = process.env.HOME;
+  const homeDir = mkdtempSync(join(tmpdir(), "powerline-history-malformed-home-"));
+  const cwd = mkdtempSync(join(tmpdir(), "powerline-history-malformed-"));
+  const historyDir = join(homeDir, ".pi", "agent", "powerline-footer", "bash-history");
+  const legacyKey = cwd.replace(/^[/\\]+|[/\\]+$/g, "").replace(/[\\/]+/g, "-") || "root";
+  const newPath = join(historyDir, `${projectStorageKey(cwd)}.json`);
+  const legacyPath = join(historyDir, `${legacyKey}.json`);
+
+  process.env.HOME = homeDir;
+  mkdirSync(historyDir, { recursive: true });
+  writeFileSync(newPath, "not json\n");
+  writeFileSync(legacyPath, JSON.stringify({
+    version: 1,
+    entries: [{ command: "git pull", cwd, timestamp: 100 }],
+  }) + "\n");
+
+  try {
+    assert.deepEqual(readProjectHistory(cwd).map((entry) => entry.command), ["git pull"]);
+  } finally {
+    process.env.HOME = originalHome;
+  }
+});
+
+test("global shell history detects Windows-style shell paths", () => {
+  const cwd = mkdtempSync(join(tmpdir(), "powerline-shell-path-"));
+  const histfile = join(cwd, ".bash_history");
+  const restoreEnv = setHistoryEnv(cwd, histfile);
+  writeFileSync(histfile, "git status\n");
+
+  try {
+    const windowsPath = "C:\\Program Files\\Git\\bin\\bash.exe";
+    const history = readGlobalShellHistory(windowsPath);
+
+    assert.deepEqual(history, ["git status"]);
+  } finally {
+    restoreEnv();
+  }
+});
+
+test("bash history preserves multiline commands instead of fragmenting them", () => {
+  const cwd = mkdtempSync(join(tmpdir(), "powerline-bash-history-"));
+  const histfile = join(cwd, ".bash_history");
+  const restoreEnv = setHistoryEnv(cwd, histfile);
+  writeFileSync(histfile, [
+    "git status",
+    "printf 'hello \\",
+    "world'",
+    "echo done",
+    "",
+  ].join("\n"));
+
+  try {
+    const history = readGlobalShellHistory("/bin/bash");
+    assert.deepEqual(history, ["echo done", "printf 'hello\nworld'", "git status"]);
+  } finally {
+    restoreEnv();
+  }
+});
+
+test("bash history preserves blank lines inside quoted commands", () => {
+  const cwd = mkdtempSync(join(tmpdir(), "powerline-bash-history-blank-"));
+  const histfile = join(cwd, ".bash_history");
+  const restoreEnv = setHistoryEnv(cwd, histfile);
+  writeFileSync(histfile, [
+    "printf 'hello",
+    "",
+    "world'",
+    "echo done",
+    "",
+  ].join("\n"));
+
+  try {
+    const history = readGlobalShellHistory("/bin/bash");
+    assert.deepEqual(history, ["echo done", "printf 'hello\n\nworld'"]);
+  } finally {
+    restoreEnv();
+  }
+});
+
+test("bash history joins backslash continuations outside quotes", () => {
+  const cwd = mkdtempSync(join(tmpdir(), "powerline-bash-history-continuation-"));
+  const histfile = join(cwd, ".bash_history");
+  const restoreEnv = setHistoryEnv(cwd, histfile);
+  writeFileSync(histfile, [
+    "echo foo \\",
+    "bar",
+    "echo done",
+    "",
+  ].join("\n"));
+
+  try {
+    const history = readGlobalShellHistory("/bin/bash");
+    assert.deepEqual(history, ["echo done", "echo foo\nbar"]);
+  } finally {
+    restoreEnv();
+  }
+});
+
+test("bash history treats trailing backslashes as continuations", () => {
+  const cwd = mkdtempSync(join(tmpdir(), "powerline-bash-history-backslash-"));
+  const histfile = join(cwd, ".bash_history");
+  const restoreEnv = setHistoryEnv(cwd, histfile);
+  writeFileSync(histfile, [
+    "echo literal \\",
+    "next-command",
+    "",
+  ].join("\n"));
+
+  try {
+    const history = readGlobalShellHistory("/bin/bash");
+    assert.deepEqual(history, ["echo literal\nnext-command"]);
+  } finally {
+    restoreEnv();
+  }
 });
 
 test("matchHistoryEntries returns newest entries when the prefix is empty", () => {
@@ -94,12 +334,12 @@ test("theme.json can override icons without touching colors", () => {
 
   try {
     writeFileSync(themePath, JSON.stringify({ icons: { auto: "↯", warning: "" } }, null, 2) + "\n");
-    process.env.POWERLINE_NERD_FONTS = "0";
+    delete process.env.POWERLINE_NERD_FONTS;
 
     const icons = getIcons();
     assert.equal(icons.auto, "↯");
     assert.equal(icons.warning, "");
-    assert.equal(icons.folder, "dir");
+    assert.equal(icons.folder, "");
   } finally {
     if (originalTheme === null) {
       if (existsSync(themePath)) unlinkSync(themePath);
@@ -132,6 +372,34 @@ test("one-off bash command context strips ! and !! prefixes", () => {
   assert.equal(getOneOffBashCommandContext("git status"), null);
 });
 
+test("one-off bash ghost suggestions strip and restore bang prefixes", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "powerline-one-off-ghost-"));
+  const histfile = join(cwd, ".zsh_history");
+  const restoreEnv = setHistoryEnv(cwd, histfile);
+  writeFileSync(histfile, "");
+  appendProjectHistory(cwd, "git status", cwd);
+
+  try {
+    const oneOffBash = getOneOffBashCommandContext("!!git st");
+    assert.ok(oneOffBash);
+
+    const engine = new BashCompletionEngine();
+    const ghost = await engine.getGhostSuggestion(
+      oneOffBash.command,
+      cwd,
+      "/bin/zsh",
+      new AbortController().signal,
+    );
+
+    assert.equal(ghost?.value, "git status");
+    assert.equal(`${oneOffBash.prefix}${ghost?.value}`, "!!git status");
+    assert.match(indexSource, /const oneOffBash = getOneOffBashCommandContext\(text\);/);
+    assert.match(indexSource, /return ghost \? \{ \.\.\.ghost, value: `\$\{oneOffBash\.prefix\}\$\{ghost\.value\}` \} : null;/);
+  } finally {
+    restoreEnv();
+  }
+});
+
 test("transcript store truncates oldest commands at command boundaries", () => {
   const store = new BashTranscriptStore({ transcriptMaxLines: 3, transcriptMaxBytes: 1024 });
   store.startCommand("a", "echo one", "/tmp");
@@ -156,84 +424,198 @@ test("transcript store keeps the active command even when it alone exceeds limit
   const snapshot = store.getSnapshot();
   assert.equal(snapshot.commands.length, 1);
   assert.equal(snapshot.commands[0]?.id, "a");
-  assert.deepEqual(snapshot.commands[0]?.output, ["1", "2", "3", "4"]);
+  assert.deepEqual(snapshot.commands[0]?.output, ["2", "3", "4"]);
+  assert.equal(snapshot.commands[0]?.truncated, true);
+  assert.equal(snapshot.totalLines, 3);
+});
+
+test("transcript store caps a single oversized output line", () => {
+  const store = new BashTranscriptStore({ transcriptMaxLines: 10, transcriptMaxBytes: 6 });
+  store.startCommand("a", "echo big", "/tmp");
+  store.appendOutput("a", "1234567890");
+
+  const snapshot = store.getSnapshot();
+  assert.equal(snapshot.commands.length, 1);
+  assert.equal(snapshot.commands[0]?.id, "a");
+  assert.equal(snapshot.commands[0]?.output[0], "67890");
+  assert.equal(snapshot.commands[0]?.truncated, true);
+  assert.equal(snapshot.totalBytes, 6);
+});
+
+test("transcript store does not split a surrogate pair when trimming an oversized line", () => {
+  const store = new BashTranscriptStore({ transcriptMaxLines: 10, transcriptMaxBytes: 14 });
+  store.startCommand("a", "echo emoji", "/tmp");
+  // Five astral-plane emoji (4 UTF-8 bytes / 2 UTF-16 code units each). Trimming
+  // by code-unit count would otherwise cut through a surrogate pair.
+  store.appendOutput("a", "\u{1F600}\u{1F600}\u{1F600}\u{1F600}\u{1F600}");
+
+  const snapshot = store.getSnapshot();
+  const trimmed = snapshot.commands[0]?.output[0] ?? "";
+  const loneSurrogate = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+  assert.equal(loneSurrogate.test(trimmed), false, "trimmed line must not contain a lone surrogate");
+  assert.equal(snapshot.commands[0]?.truncated, true);
+  assert.ok(Buffer.byteLength(trimmed, "utf8") <= 14, "trimmed line must respect the byte cap");
+});
+
+test("project history refuses symlinked cache files", () => {
+  const originalHome = process.env.HOME;
+  const homeDir = mkdtempSync(join(tmpdir(), "powerline-history-symlink-home-"));
+  const cwd = mkdtempSync(join(tmpdir(), "powerline-history-symlink-cwd-"));
+  const historyDir = join(homeDir, ".pi", "agent", "powerline-footer", "bash-history");
+  const targetPath = join(homeDir, "target-history.json");
+  const historyPath = join(historyDir, `${projectStorageKey(cwd)}.json`);
+
+  process.env.HOME = homeDir;
+  mkdirSync(historyDir, { recursive: true });
+  writeFileSync(targetPath, "keep\n");
+  symlinkSync(targetPath, historyPath);
+
+  try {
+    appendProjectHistory(cwd, "git status", cwd);
+
+    assert.equal(readFileSync(targetPath, "utf8"), "keep\n");
+    assert.deepEqual(readProjectHistory(cwd), []);
+  } finally {
+    process.env.HOME = originalHome;
+  }
+});
+
+test("global shell history ignores unsafe HISTFILE paths", () => {
+  const homeDir = mkdtempSync(join(tmpdir(), "powerline-safe-history-home-"));
+  const outsideDir = mkdtempSync(join(tmpdir(), "powerline-unsafe-history-"));
+  const histfile = join(outsideDir, ".zsh_history");
+  const restoreEnv = setHistoryEnv(homeDir, histfile);
+  writeFileSync(histfile, ": 1711111111:0;git secret\n");
+
+  try {
+    assert.deepEqual(readGlobalShellHistory("/bin/zsh"), []);
+  } finally {
+    restoreEnv();
+  }
+});
+
+test("global shell history ignores symlinked HISTFILE paths", () => {
+  const homeDir = mkdtempSync(join(tmpdir(), "powerline-safe-history-link-home-"));
+  const targetDir = join(homeDir, "target");
+  const targetPath = join(targetDir, ".zsh_history");
+  const histfile = join(homeDir, ".zsh_history");
+  const restoreEnv = setHistoryEnv(homeDir, histfile);
+  mkdirSync(targetDir, { recursive: true });
+  writeFileSync(targetPath, ": 1711111111:0;git secret\n");
+  symlinkSync(targetPath, histfile);
+
+  try {
+    assert.deepEqual(readGlobalShellHistory("/bin/zsh"), []);
+  } finally {
+    restoreEnv();
+  }
+});
+
+test("global shell history reads custom HISTFILE names inside home", () => {
+  const homeDir = mkdtempSync(join(tmpdir(), "powerline-safe-history-name-home-"));
+  const histfile = join(homeDir, ".cache", "custom-zsh-history");
+  const restoreEnv = setHistoryEnv(homeDir, histfile);
+  mkdirSync(join(homeDir, ".cache"), { recursive: true });
+  writeFileSync(histfile, ": 1711111111:0;git switch\n");
+
+  try {
+    assert.deepEqual(readGlobalShellHistory("/bin/zsh"), ["git switch"]);
+  } finally {
+    restoreEnv();
+  }
 });
 
 test("ghost suggestion prefers project history over global history", async () => {
   const cwd = mkdtempSync(join(tmpdir(), "powerline-ghost-"));
   const histfile = join(cwd, ".zsh_history");
-  process.env.HISTFILE = histfile;
+  const restoreEnv = setHistoryEnv(cwd, histfile);
   writeFileSync(histfile, ": 1711111111:0;git switch\n");
   appendProjectHistory(cwd, "git status", cwd);
   appendProjectHistory(cwd, "git stash", cwd);
 
-  const engine = new BashCompletionEngine();
-  const suggestion = await engine.getGhostSuggestion(
-    "git st",
-    cwd,
-    "/bin/zsh",
-    new AbortController().signal,
-  );
+  try {
+    const engine = new BashCompletionEngine();
+    const suggestion = await engine.getGhostSuggestion(
+      "git st",
+      cwd,
+      "/bin/zsh",
+      new AbortController().signal,
+    );
 
-  assert.equal(suggestion?.value, "git stash");
-  assert.equal(suggestion?.source, "project-history");
+    assert.equal(suggestion?.value, "git stash");
+    assert.equal(suggestion?.source, "project-history");
+  } finally {
+    restoreEnv();
+  }
 });
 
 test("ghost suggestion shows newest project history on an empty prompt", async () => {
   const cwd = mkdtempSync(join(tmpdir(), "powerline-empty-project-ghost-"));
   const histfile = join(cwd, ".zsh_history");
-  process.env.HISTFILE = histfile;
+  const restoreEnv = setHistoryEnv(cwd, histfile);
   writeFileSync(histfile, ": 1711111111:0;git pull\n");
   appendProjectHistory(cwd, "git status", cwd);
   appendProjectHistory(cwd, "git stash", cwd);
 
-  const engine = new BashCompletionEngine();
-  const suggestion = await engine.getGhostSuggestion(
-    "",
-    cwd,
-    "/bin/zsh",
-    new AbortController().signal,
-  );
+  try {
+    const engine = new BashCompletionEngine();
+    const suggestion = await engine.getGhostSuggestion(
+      "",
+      cwd,
+      "/bin/zsh",
+      new AbortController().signal,
+    );
 
-  assert.equal(suggestion?.value, "git stash");
-  assert.equal(suggestion?.source, "project-history");
+    assert.equal(suggestion?.value, "git stash");
+    assert.equal(suggestion?.source, "project-history");
+  } finally {
+    restoreEnv();
+  }
 });
 
 test("ghost suggestion stays empty on an empty prompt when only global history exists", async () => {
   const cwd = mkdtempSync(join(tmpdir(), "powerline-empty-global-ghost-"));
   const histfile = join(cwd, ".zsh_history");
-  process.env.HISTFILE = histfile;
+  const restoreEnv = setHistoryEnv(cwd, histfile);
   writeFileSync(histfile, [
     ": 1711111111:0;git fetch",
     ": 1711111112:0;git pull",
   ].join("\n"));
 
-  const engine = new BashCompletionEngine();
-  const suggestion = await engine.getGhostSuggestion(
-    "",
-    cwd,
-    "/bin/zsh",
-    new AbortController().signal,
-  );
+  try {
+    const engine = new BashCompletionEngine();
+    const suggestion = await engine.getGhostSuggestion(
+      "",
+      cwd,
+      "/bin/zsh",
+      new AbortController().signal,
+    );
 
-  assert.equal(suggestion, null);
+    assert.equal(suggestion, null);
+  } finally {
+    restoreEnv();
+  }
 });
 
 test("ghost suggestion stays empty when the prompt is empty and no history exists", async () => {
   const cwd = mkdtempSync(join(tmpdir(), "powerline-empty-no-history-"));
   const histfile = join(cwd, ".zsh_history");
-  process.env.HISTFILE = histfile;
+  const restoreEnv = setHistoryEnv(cwd, histfile);
   writeFileSync(histfile, "");
 
-  const engine = new BashCompletionEngine();
-  const suggestion = await engine.getGhostSuggestion(
-    "",
-    cwd,
-    "/bin/zsh",
-    new AbortController().signal,
-  );
+  try {
+    const engine = new BashCompletionEngine();
+    const suggestion = await engine.getGhostSuggestion(
+      "",
+      cwd,
+      "/bin/zsh",
+      new AbortController().signal,
+    );
 
-  assert.equal(suggestion, null);
+    assert.equal(suggestion, null);
+  } finally {
+    restoreEnv();
+  }
 });
 
 test("ghost suggestion can extend the current token from deterministic path completions", async () => {
@@ -284,154 +666,215 @@ test("ghost suggestion does not invoke shell-native completion hooks", async () 
 test("command-position ghost prefers the newest successful project-history command", async () => {
   const cwd = mkdtempSync(join(tmpdir(), "powerline-command-project-history-"));
   const histfile = join(cwd, ".zsh_history");
-  process.env.HISTFILE = histfile;
+  const restoreEnv = setHistoryEnv(cwd, histfile);
   writeFileSync(histfile, "");
   appendProjectHistory(cwd, "git status", cwd);
 
-  const engine = new BashCompletionEngine();
-  const suggestion = await engine.getGhostSuggestion(
-    "g",
-    cwd,
-    "/bin/zsh",
-    new AbortController().signal,
-  );
+  try {
+    const engine = new BashCompletionEngine();
+    const suggestion = await engine.getGhostSuggestion(
+      "g",
+      cwd,
+      "/bin/zsh",
+      new AbortController().signal,
+    );
 
-  assert.equal(suggestion?.value, "git status");
-  assert.equal(suggestion?.source, "project-history");
+    assert.equal(suggestion?.value, "git status");
+    assert.equal(suggestion?.source, "project-history");
+  } finally {
+    restoreEnv();
+  }
 });
 
 test("command-position ghost uses guarded global git history when project history is absent", async () => {
   const cwd = mkdtempSync(join(tmpdir(), "powerline-command-global-history-"));
   const histfile = join(cwd, ".zsh_history");
-  process.env.HISTFILE = histfile;
+  const restoreEnv = setHistoryEnv(cwd, histfile);
   writeFileSync(histfile, ": 1711111111:0;git stash\n");
 
-  const engine = new BashCompletionEngine();
-  const shortStemSuggestion = await engine.getGhostSuggestion(
-    "g",
-    cwd,
-    "/bin/zsh",
-    new AbortController().signal,
-  );
-  const guardedSuggestion = await engine.getGhostSuggestion(
-    "gi",
-    cwd,
-    "/bin/zsh",
-    new AbortController().signal,
-  );
+  try {
+    const engine = new BashCompletionEngine();
+    const shortStemSuggestion = await engine.getGhostSuggestion(
+      "g",
+      cwd,
+      "/bin/zsh",
+      new AbortController().signal,
+    );
+    const guardedSuggestion = await engine.getGhostSuggestion(
+      "gi",
+      cwd,
+      "/bin/zsh",
+      new AbortController().signal,
+    );
 
-  assert.equal(shortStemSuggestion?.value, "git status");
-  assert.equal(shortStemSuggestion?.source, "git");
-  assert.equal(guardedSuggestion?.value, "git stash");
-  assert.equal(guardedSuggestion?.source, "global-history");
+    assert.equal(shortStemSuggestion?.value, "git status");
+    assert.equal(shortStemSuggestion?.source, "git");
+    assert.equal(guardedSuggestion?.value, "git stash");
+    assert.equal(guardedSuggestion?.source, "global-history");
+  } finally {
+    restoreEnv();
+  }
 });
 
 test("command-position ghost falls back to git status when git is likely but history is absent", async () => {
   const cwd = mkdtempSync(join(tmpdir(), "powerline-command-git-default-"));
   const histfile = join(cwd, ".zsh_history");
-  process.env.HISTFILE = histfile;
+  const restoreEnv = setHistoryEnv(cwd, histfile);
   writeFileSync(histfile, "");
 
-  const engine = new BashCompletionEngine();
-  const suggestion = await engine.getGhostSuggestion(
-    "g",
-    cwd,
-    "/bin/zsh",
-    new AbortController().signal,
-  );
+  try {
+    const engine = new BashCompletionEngine();
+    const suggestion = await engine.getGhostSuggestion(
+      "g",
+      cwd,
+      "/bin/zsh",
+      new AbortController().signal,
+    );
 
-  assert.equal(suggestion?.value, "git status");
-  assert.equal(suggestion?.source, "git");
+    assert.equal(suggestion?.value, "git status");
+    assert.equal(suggestion?.source, "git");
+  } finally {
+    restoreEnv();
+  }
 });
 
 test("command-position ghost falls back to cd dot-dot for the cd stem", async () => {
   const cwd = mkdtempSync(join(tmpdir(), "powerline-command-cd-default-"));
   const histfile = join(cwd, ".zsh_history");
-  process.env.HISTFILE = histfile;
+  const restoreEnv = setHistoryEnv(cwd, histfile);
   writeFileSync(histfile, "");
 
-  const engine = new BashCompletionEngine();
-  const suggestion = await engine.getGhostSuggestion(
-    "c",
-    cwd,
-    "/bin/zsh",
-    new AbortController().signal,
-  );
+  try {
+    const engine = new BashCompletionEngine();
+    const suggestion = await engine.getGhostSuggestion(
+      "c",
+      cwd,
+      "/bin/zsh",
+      new AbortController().signal,
+    );
 
-  assert.equal(suggestion?.value, "cd ..");
-  assert.equal(suggestion?.source, "path");
+    assert.equal(suggestion?.value, "cd ..");
+    assert.equal(suggestion?.source, "path");
+  } finally {
+    restoreEnv();
+  }
 });
 
 test("command-position ghost stays empty when there is no supported history-backed stem", async () => {
   const cwd = mkdtempSync(join(tmpdir(), "powerline-command-empty-"));
   const histfile = join(cwd, ".zsh_history");
-  process.env.HISTFILE = histfile;
+  const restoreEnv = setHistoryEnv(cwd, histfile);
   writeFileSync(histfile, "");
 
-  const engine = new BashCompletionEngine();
-  const suggestion = await engine.getGhostSuggestion(
-    "x",
-    cwd,
-    "/bin/zsh",
-    new AbortController().signal,
-  );
+  try {
+    const engine = new BashCompletionEngine();
+    const suggestion = await engine.getGhostSuggestion(
+      "x",
+      cwd,
+      "/bin/zsh",
+      new AbortController().signal,
+    );
 
-  assert.equal(suggestion, null);
+    assert.equal(suggestion, null);
+  } finally {
+    restoreEnv();
+  }
 });
 
 test("ghost suggestion ignores invalid raw global history and keeps a deterministic git candidate", async () => {
   const cwd = mkdtempSync(join(tmpdir(), "powerline-global-history-ghost-"));
   const histfile = join(cwd, ".zsh_history");
-  process.env.HISTFILE = histfile;
+  const restoreEnv = setHistoryEnv(cwd, histfile);
   writeFileSync(histfile, ": 1711111111:0;git statis\n");
 
-  const engine = new BashCompletionEngine();
-  const suggestion = await engine.getGhostSuggestion(
-    "git st",
-    cwd,
-    "/bin/zsh",
-    new AbortController().signal,
-  );
+  try {
+    const engine = new BashCompletionEngine();
+    const suggestion = await engine.getGhostSuggestion(
+      "git st",
+      cwd,
+      "/bin/zsh",
+      new AbortController().signal,
+    );
 
-  assert.match(suggestion?.value ?? "", /^git sta(?:sh|tus)$/);
-  assert.equal(suggestion?.source, "git");
+    assert.match(suggestion?.value ?? "", /^git sta(?:sh|tus)$/);
+    assert.equal(suggestion?.source, "git");
+  } finally {
+    restoreEnv();
+  }
 });
 
 test("global history boosts already-valid deterministic git candidates", async () => {
   const cwd = mkdtempSync(join(tmpdir(), "powerline-global-history-tiebreak-ghost-"));
   const histfile = join(cwd, ".zsh_history");
-  process.env.HISTFILE = histfile;
+  const restoreEnv = setHistoryEnv(cwd, histfile);
   writeFileSync(histfile, ": 1711111111:0;git stash\n");
 
-  const engine = new BashCompletionEngine();
-  const suggestion = await engine.getGhostSuggestion(
-    "git st",
-    cwd,
-    "/bin/zsh",
-    new AbortController().signal,
-  );
+  try {
+    const engine = new BashCompletionEngine();
+    const suggestion = await engine.getGhostSuggestion(
+      "git st",
+      cwd,
+      "/bin/zsh",
+      new AbortController().signal,
+    );
 
-  assert.equal(suggestion?.value, "git stash");
-  assert.equal(suggestion?.source, "git");
+    assert.equal(suggestion?.value, "git stash");
+    assert.equal(suggestion?.source, "git");
+  } finally {
+    restoreEnv();
+  }
+});
+
+test("git ref ghost suggestions handle an empty argument after trailing space", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "powerline-git-ref-ghost-"));
+  const homeDir = mkdtempSync(join(tmpdir(), "powerline-git-ref-home-"));
+  const restoreEnv = setHistoryEnv(homeDir, join(homeDir, ".bash_history"));
+
+  try {
+    runGitForTest(cwd, ["init", "-b", "main"]);
+    writeFileSync(join(cwd, "file.txt"), "x\n");
+    runGitForTest(cwd, ["add", "file.txt"]);
+    runGitForTest(cwd, ["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "init"]);
+    runGitForTest(cwd, ["branch", "aaa-target"]);
+
+    const engine = new BashCompletionEngine();
+    const suggestion = await engine.getGhostSuggestion(
+      "git checkout ",
+      cwd,
+      "/bin/bash",
+      new AbortController().signal,
+    );
+
+    assert.equal(suggestion?.value, "git checkout aaa-target");
+    assert.equal(suggestion?.source, "git");
+  } finally {
+    restoreEnv();
+    rmSync(cwd, { recursive: true, force: true });
+    rmSync(homeDir, { recursive: true, force: true });
+  }
 });
 
 test("deterministic path completion keeps directory suffixes for escaped paths", async () => {
   const cwd = mkdtempSync(join(tmpdir(), "powerline-path-escaped-"));
   const histfile = join(cwd, ".zsh_history");
-  process.env.HISTFILE = histfile;
+  const restoreEnv = setHistoryEnv(cwd, histfile);
   writeFileSync(histfile, "");
   mkdirSync(join(cwd, "My Folder"), { recursive: true });
 
-  const engine = new BashCompletionEngine();
-  const suggestion = await engine.getGhostSuggestion(
-    "cd M",
-    cwd,
-    "/bin/zsh",
-    new AbortController().signal,
-  );
+  try {
+    const engine = new BashCompletionEngine();
+    const suggestion = await engine.getGhostSuggestion(
+      "cd M",
+      cwd,
+      "/bin/zsh",
+      new AbortController().signal,
+    );
 
-  assert.equal(suggestion?.value, "cd My\\ Folder/");
-  assert.equal(suggestion?.source, "path");
+    assert.equal(suggestion?.value, "cd My\\ Folder/");
+    assert.equal(suggestion?.source, "path");
+  } finally {
+    restoreEnv();
+  }
 });
 
 test("deterministic path completion handles bash argument position", async () => {
@@ -452,7 +895,7 @@ test("deterministic path completion handles bash argument position", async () =>
 
 test("managed shell session preserves cwd changes across commands", async () => {
   const cwd = mkdtempSync(join(tmpdir(), "powerline-shell-"));
-  const childDir = join(cwd, "child");
+  const childDir = join(cwd, "child:with:colon");
   mkdirSync(childDir, { recursive: true });
   const store = new BashTranscriptStore({ transcriptMaxLines: 100, transcriptMaxBytes: 64 * 1024 });
   const session = new ManagedShellSession("/bin/zsh", cwd, store, () => {}, () => {});
@@ -477,6 +920,152 @@ test("managed shell session preserves cwd changes across commands", async () => 
     const snapshot = store.getSnapshot();
     const lastCommand = snapshot.commands[snapshot.commands.length - 1];
     assert.ok(lastCommand?.output.includes(childDir));
+  } finally {
+    session.dispose();
+  }
+});
+
+test("managed shell session starts with POSIX sh fallback", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "powerline-shell-sh-"));
+  const store = new BashTranscriptStore({ transcriptMaxLines: 100, transcriptMaxBytes: 64 * 1024 });
+  const session = new ManagedShellSession("/bin/sh", cwd, store, () => {}, () => {});
+
+  const waitForCommand = async () => {
+    const start = Date.now();
+    while (session.state.running && Date.now() - start < 5000) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    assert.equal(session.state.running, false);
+  };
+
+  try {
+    await session.ensureReady();
+    assert.equal(session.state.ready, true);
+    assert.equal(realpathSync(session.state.cwd), realpathSync(cwd));
+
+    await session.runCommand("printf 'sh-ok\\n'");
+    await waitForCommand();
+    assert.ok(store.getSnapshot().commands.at(-1)?.output.includes("sh-ok"));
+  } finally {
+    session.dispose();
+  }
+});
+
+test("managed shell session completes commands with no trailing output newline", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "powerline-shell-no-newline-"));
+  const store = new BashTranscriptStore({ transcriptMaxLines: 100, transcriptMaxBytes: 64 * 1024 });
+  const session = new ManagedShellSession("/bin/zsh", cwd, store, () => {}, () => {});
+
+  const waitForCommand = async () => {
+    const start = Date.now();
+    while (session.state.running && Date.now() - start < 5000) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    assert.equal(session.state.running, false);
+  };
+
+  try {
+    await session.ensureReady();
+    await session.runCommand("printf 'partial'");
+    await waitForCommand();
+
+    const lastCommand = store.getSnapshot().commands.at(-1);
+    assert.equal(lastCommand?.exitCode, 0);
+    assert.ok(lastCommand?.output.includes("partial"));
+  } finally {
+    session.dispose();
+  }
+});
+
+test("managed shell session treats spoofed sentinels as command output", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "powerline-shell-spoof-"));
+  const store = new BashTranscriptStore({ transcriptMaxLines: 100, transcriptMaxBytes: 64 * 1024 });
+  const session = new ManagedShellSession("/bin/zsh", cwd, store, () => {}, () => {});
+
+  const waitForCommand = async () => {
+    const start = Date.now();
+    while (session.state.running && Date.now() - start < 5000) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    assert.equal(session.state.running, false);
+  };
+
+  try {
+    await session.ensureReady();
+    await session.runCommand("printf '__PI_CMD_DONE__:cmd-1:0:/tmp\\nreal-output\\n'");
+    await waitForCommand();
+
+    const lastCommand = store.getSnapshot().commands.at(-1);
+    assert.equal(lastCommand?.exitCode, 0);
+    assert.ok(lastCommand?.output.includes("__PI_CMD_DONE__:cmd-1:0:/tmp"));
+    assert.ok(lastCommand?.output.includes("real-output"));
+  } finally {
+    session.dispose();
+  }
+});
+
+test("managed shell session removes temp command scripts on dispose", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "powerline-shell-cleanup-"));
+  const store = new BashTranscriptStore({ transcriptMaxLines: 100, transcriptMaxBytes: 64 * 1024 });
+  const session = new ManagedShellSession("/bin/zsh", cwd, store, () => {}, () => {});
+  const tempDir = Reflect.get(session, "tempDir") as string;
+
+  await session.ensureReady();
+  await session.runCommand("sleep 5 # powerline-secret-marker");
+  assert.equal(existsSync(tempDir), true);
+  session.dispose();
+  assert.equal(existsSync(tempDir), false);
+});
+
+test("managed shell session cleanup ignores command-mutated script path variables", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "powerline-shell-cleanup-var-"));
+  const victimPath = join(cwd, "victim.txt");
+  writeFileSync(victimPath, "keep\n");
+  const store = new BashTranscriptStore({ transcriptMaxLines: 100, transcriptMaxBytes: 64 * 1024 });
+  const session = new ManagedShellSession("/bin/zsh", cwd, store, () => {}, () => {});
+  const tempDir = Reflect.get(session, "tempDir") as string;
+
+  const waitForCommand = async () => {
+    const start = Date.now();
+    while (session.state.running && Date.now() - start < 5000) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    assert.equal(session.state.running, false);
+  };
+
+  try {
+    await session.ensureReady();
+    await session.runCommand(`__pi_source_file=${quoteForTestShell(victimPath)}`);
+    await waitForCommand();
+
+    assert.equal(readFileSync(victimPath, "utf8"), "keep\n");
+    assert.equal(existsSync(join(tempDir, "cmd-1.sh")), false);
+  } finally {
+    session.dispose();
+  }
+});
+
+test("managed shell session completes after partial stderr output", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "powerline-shell-stderr-"));
+  const store = new BashTranscriptStore({ transcriptMaxLines: 100, transcriptMaxBytes: 64 * 1024 });
+  const session = new ManagedShellSession("/bin/zsh", cwd, store, () => {}, () => {});
+
+  const waitForCommand = async () => {
+    const start = Date.now();
+    while (session.state.running && Date.now() - start < 5000) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    assert.equal(session.state.running, false);
+  };
+
+  try {
+    await session.ensureReady();
+    await session.runCommand("printf err >&2; printf 'ok\\n'");
+    await waitForCommand();
+
+    const lastCommand = store.getSnapshot().commands.at(-1);
+    assert.equal(lastCommand?.exitCode, 0);
+    assert.ok(lastCommand?.output.includes("ok"));
   } finally {
     session.dispose();
   }
@@ -1552,5 +2141,31 @@ test("bash editor submit clears the prompt and refreshes the empty ghost suggest
     assert.equal(refreshed, true);
   } finally {
     links.cleanup();
+  }
+});
+
+test("project history is persisted atomically with no leftover temp files", () => {
+  const originalHome = process.env.HOME;
+  const homeDir = mkdtempSync(join(tmpdir(), "powerline-history-atomic-home-"));
+  const cwd = mkdtempSync(join(tmpdir(), "powerline-history-atomic-cwd-"));
+  const historyDir = join(homeDir, ".pi", "agent", "powerline-footer", "bash-history");
+  process.env.HOME = homeDir;
+
+  try {
+    appendProjectHistory(cwd, "git status", cwd);
+    appendProjectHistory(cwd, "git stash", cwd);
+
+    assert.deepEqual(
+      readProjectHistory(cwd).map((entry) => entry.command),
+      ["git stash", "git status"],
+    );
+
+    // The atomic temp-file + rename write must not leave .tmp files behind.
+    const leftoverTempFiles = readdirSync(historyDir).filter((name) => name.endsWith(".tmp"));
+    assert.deepEqual(leftoverTempFiles, [], "no temp files should remain after an atomic history write");
+  } finally {
+    process.env.HOME = originalHome;
+    rmSync(homeDir, { recursive: true, force: true });
+    rmSync(cwd, { recursive: true, force: true });
   }
 });

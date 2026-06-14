@@ -82,21 +82,44 @@ test("fixed cluster caps selector-style editor replacements around the selected 
 });
 
 test("fixed cluster keeps tail status lines when compact", () => {
-  const rendered = renderFixedEditorCluster({
+  const input = {
     width: 80,
     terminalRows: 3,
     statusLines: ["above-widget", "powerline-status", "⠏ Shaolin Switchblade Sync..."],
     editorLines: ["edit"],
-  });
+  };
+  const rendered = renderFixedEditorCluster(input);
+  const rerendered = renderFixedEditorCluster(input);
 
   assert.deepEqual(rendered.lines, ["⠏ Shaolin Switchblade Sync...", "edit"]);
+  assert.strictEqual(rendered, rerendered);
+});
+
+test("fixed cluster cache notices mutated input arrays", () => {
+  const statusLines = ["first-status"];
+  const editorLines = ["edit"];
+  const input = {
+    width: 80,
+    terminalRows: 3,
+    statusLines,
+    editorLines,
+  };
+
+  assert.deepEqual(renderFixedEditorCluster(input).lines, ["first-status", "edit"]);
+
+  statusLines[0] = "second-status";
+  editorLines[0] = "updated-edit";
+
+  assert.deepEqual(renderFixedEditorCluster(input).lines, ["second-status", "updated-edit"]);
 });
 
 test("terminal split can render a hidden status container in the fixed cluster", () => {
   const terminal = new FakeTerminal();
   const status = {
     text: "⠏ Shaolin Switchblade Sync...",
+    renders: 0,
     render() {
+      this.renders += 1;
       return ["", this.text];
     },
   };
@@ -134,14 +157,21 @@ test("terminal split can render a hidden status container in the fixed cluster",
 
   assert.deepEqual(status.render(), []);
   tui.doRender();
+  assert.equal(status.renders, 1);
   assert.ok(terminal.writes.at(-1)?.includes("⠏ Shaolin Switchblade Sync..."));
 
   status.text = "⠙ Shaolin Switchblade Sync...";
   compositor.requestRepaint();
+  assert.equal(status.renders, 2);
   assert.ok(terminal.writes.at(-1)?.includes("⠙ Shaolin Switchblade Sync..."));
 
+  status.text = "⠹ Shaolin Switchblade Sync...";
+  compositor.requestRepaint();
+  assert.equal(status.renders, 3);
+  assert.ok(terminal.writes.at(-1)?.includes("⠹ Shaolin Switchblade Sync..."));
+
   compositor.dispose();
-  assert.deepEqual(status.render(), ["", "⠙ Shaolin Switchblade Sync..."]);
+  assert.deepEqual(status.render(), ["", "⠹ Shaolin Switchblade Sync..."]);
 });
 
 test("terminal split escape helpers generate DEC scroll region controls", () => {
@@ -164,6 +194,17 @@ test("fixed cluster paint clears bottom rows and positions hardware cursor", () 
   assert.ok(paint.includes("\x1b[9;1H\x1b[2Ktop"));
   assert.ok(paint.includes("\x1b[10;1H\x1b[2Kedit"));
   assert.ok(paint.endsWith("\x1b[10;3H\x1b[?25h"));
+});
+
+test("fixed cluster paint hides hardware cursor when requested", () => {
+  const paint = buildFixedClusterPaint(
+    { lines: ["top", "edit"], cursor: { row: 1, col: 2 } },
+    10,
+    20,
+    false,
+  );
+
+  assert.ok(paint.endsWith("\x1b[10;3H\x1b[?25l"));
 });
 
 test("terminal split reserves rows, hides root renderables, repaints, and cleans up", () => {
@@ -447,7 +488,7 @@ test("terminal split keeps tabbed overlay composition within terminal width", ()
   const overlay = "\x1b[38;2;119;125;136m[grep]: render.ts-706- \treturn [...lines.slice(0, visibleLines), truncLine(theme.fg(\"dim\", hint), width)];\x1b[39m";
 
   const before = tui.compositeLineAt("Validation before " + " ".repeat(232), overlay, 20, 210, 250);
-  assert.ok(visibleWidth(before) > 250);
+  assert.match(before, /\t/);
 
   const compositor = new TerminalSplitCompositor({
     tui,
@@ -581,6 +622,42 @@ test("terminal split refreshes scroll bounds after fixed status rows appear", ()
     "line-0", "line-1", "line-2", "line-3", "line-4",
     "line-5", "line-6", "line-7", "line-8", "line-9",
   ]);
+
+  compositor.dispose();
+});
+
+test("terminal split avoids full redraw when only fixed cluster height changes", () => {
+  const terminal = new FakeTerminal();
+  terminal.columns = 30;
+  terminal.setRows(8);
+  let statusVisible = false;
+  const rootLines = Array.from({ length: 16 }, (_, index) => `line-${index}`);
+  const tui = new TUI(terminal as any, false);
+  tui.addChild({
+    render: () => rootLines,
+    invalidate() {},
+  });
+
+  const compositor = new TerminalSplitCompositor({
+    tui,
+    terminal,
+    renderCluster: () => ({
+      lines: statusVisible ? ["⠏ fixed status", "editor"] : ["editor"],
+      cursor: null,
+    }),
+  });
+
+  compositor.install();
+  (tui as any).doRender();
+  assert.equal(tui.fullRedraws, 1);
+
+  terminal.writes = [];
+  statusVisible = true;
+  (tui as any).doRender();
+
+  assert.equal(tui.fullRedraws, 1);
+  assert.doesNotMatch(terminal.writes.join(""), /\x1b\[2J/);
+  assert.match(terminal.writes.join(""), /⠏ fixed status/);
 
   compositor.dispose();
 });

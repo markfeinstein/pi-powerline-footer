@@ -154,7 +154,10 @@ test("fixed editor captures Pi status messages with the editor cluster", () => {
   assert.match(source, /const statusContainerCandidate = tuiChildren\[editorContainerMatch\.index - 2\] \?\? null/);
   assert.match(source, /fixedStatusContainer = statusContainerCandidate && typeof statusContainerCandidate\.render === "function"/);
   assert.match(source, /compositor\.renderHidden\(fixedStatusContainer, width\)\.filter\(\(line\) => visibleWidth\(line\) > 0\)/);
-  assert.match(source, /statusLines: \[\.\.\.aboveWidgetLines, \.\.\.renderPowerlineStatusLines\(width\), \.\.\.statusContainerLines\]/);
+  assert.match(source, /statusLines = \[\.\.\.renderPowerlineStatusLines\(width\), \.\.\.workingStatusLines\]/);
+  // Third-party aboveEditor widgets (e.g. a todo list) are kept out of the
+  // powerline status rows so statusBelowPrompt cannot drag them under the editor.
+  assert.match(source, /aboveEditorWidgetLines: aboveWidgetLines,/);
   assert.match(source, /if \(fixedStatusContainer\?\.render\) compositor\.hideRenderable\(fixedStatusContainer\)/);
   assert.match(source, /fixedStatusContainer = null/);
 });
