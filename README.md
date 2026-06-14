@@ -26,7 +26,7 @@ Customizes the default [pi](https://github.com/badlogic/pi-mono) editor with a p
 
 **Git integration** — Async status fetching with 1s cache TTL. Automatically invalidates on file writes/edits. Shows branch, staged (+), unstaged (*), and untracked (?) counts.
 
-**Context awareness** — Color-coded warnings at 70% (yellow) and 90% (red) context usage. During streaming, the context segment refreshes from live assistant usage instead of waiting for the next turn. Auto-compact indicator when enabled. If `pi-custom-compaction` is installed and enabled, the powerline automatically hides native context segments so the footer does not show stale post-summary usage.
+**Context awareness** — Color-coded warnings at 70% (yellow) and 90% (red) context usage. The context percentage is shown as a whole number (for example, `17%/272k`). During streaming, the context segment refreshes from live assistant usage instead of waiting for the next turn. Auto-compact indicator when enabled. If `pi-custom-compaction` is installed and enabled, the powerline automatically hides native context segments so the footer does not show stale post-summary usage.
 
 **Token intelligence** — Smart formatting (1.2k, 45M), subscription detection (shows "(sub)" vs dollar cost).
 
@@ -65,16 +65,63 @@ You can also set it in `~/.pi/agent/settings.json` or project-local `.pi/setting
 
 Use `"fixedEditor": true` to enable it again. Add `"mouseScroll": false` if you want native terminal selection instead of fixed-editor mouse handling.
 
+### Status bar position
+
+In fixed-editor mode the status bar normally renders above the editor. Set `"statusBelowPrompt": true` to render it directly below the editor (the prompt) instead:
+
+```json
+{
+  "powerline": {
+    "preset": "default",
+    "statusBelowPrompt": true
+  }
+}
+```
+
+Defaults to `false` (status above the editor). Top widget rows stay above the editor regardless.
+
+### Last-prompt position
+
+In fixed-editor mode the most recent prompt is echoed below the editor. Set `"lastPromptAboveInput": true` to render it directly above the editor (the input) instead:
+
+```json
+{
+  "powerline": {
+    "preset": "default",
+    "lastPromptAboveInput": true
+  }
+}
+```
+
+Defaults to `false` (last prompt below the input). It still renders below the status and top rows.
+
+### Working status display
+
+In fixed-editor mode Pi's live "Working…" status normally renders on its own row. Two optional flags adjust how it appears:
+
+```json
+{
+  "powerline": {
+    "preset": "default",
+    "inlineWorkingStatus": true,
+    "hideWorkingMessage": false
+  }
+}
+```
+
+- `inlineWorkingStatus` (default `false`): fold the Pi "Working…" status into the first powerline bar row instead of a separate line. A fixed-width spinner slot is reserved so the bar text doesn't shift when the spinner toggles. Requires `fixedEditor`.
+- `hideWorkingMessage` (default `false`): hide the working message text while keeping the spinner glyph.
+
 | Preset | Description |
 |--------|-------------|
-| `default` | Model, thinking, path (basename), git, context, tokens, cost |
-| `minimal` | Just path (basename), git, context |
-| `compact` | Model, git, cost, context |
-| `full` | Everything including hostname, time, abbreviated path |
+| `default` | Model, thinking, shell mode, path (basename), git, context, cache_read, cost |
+| `minimal` | Shell mode, path (basename), git, context |
+| `compact` | Model, shell mode, git, cost, context |
+| `full` | Hostname, model, thinking, shell mode, path (abbreviated), git, subagents, tokens, cost, context, time, extension statuses |
 | `nerd` | Maximum detail for Nerd Font users |
 | `ascii` | Safe for any terminal |
 
-**Environment:** `POWERLINE_NERD_FONTS=1` to force Nerd Fonts, `=0` for ASCII.
+**Nerd Font icons:** controlled primarily by config — set `"nerdFonts": true` (glyph icons + rounded pill caps) or `false` (ASCII fallback: `dir`, `⎇`, `>`/`<`) in the `powerline` block of `~/.pi/agent/settings.json`. When unset it defaults to Nerd Fonts on. The `POWERLINE_NERD_FONTS` environment variable is an optional override that wins when explicitly set (`=1` forces glyphs, `=0` forces ASCII).
 
 Preset selection is saved to `~/.pi/agent/settings.json` under `powerline` and restored on startup.
 Run `/powerline default` to switch back to the default preset.
@@ -316,6 +363,8 @@ The path segment supports three modes:
 | `abbreviated` | `…/extensions/powerline-footer` | Full path with home abbreviated and length limit |
 | `full` | `~/.pi/agent/extensions/powerline-footer` | Complete path with home abbreviated |
 
+For linked git worktree roots, basename mode shows `repo/worktree` (for example, `powerline-footer/main`) so the worktree name is not ambiguous.
+
 Configure via preset options: `path: { mode: "full" }`
 
 ## Git polling
@@ -332,9 +381,42 @@ By default the git segment polls both branch and dirty state. If background `git
 
 Use `"off"` to disable extension-owned git polling entirely and only show the branch reported by Pi when available.
 
+## Custom layout (`custom` preset)
+
+The `custom` preset can be fully defined from settings. Add a `powerline.custom` object to choose **which** segments appear, in **what order**, and the **separator** style:
+
+```json
+{
+  "powerline": {
+    "preset": "custom",
+    "custom": {
+      "leftSegments": ["git", "path", "model", "thinking", "cache_read", "context_total"],
+      "rightSegments": ["time_spent"],
+      "secondarySegments": [],
+      "separator": "pipe"
+    }
+  }
+}
+```
+
+`powerline.custom` fields (all optional):
+
+- `leftSegments`: ordered list of segment ids shown on the left, flush to the left edge
+- `rightSegments`: ordered list of segment ids pinned to the right edge (last id sits rightmost)
+- `secondarySegments`: ordered list of segment ids on the secondary row
+- `separator`: any separator style (see below)
+
+Notes:
+
+- Only applies when `preset` is `custom`.
+- `leftSegments` render flush-left and `rightSegments` render flush-right on the same row, with the gap between them padded out to the terminal edge. On a terminal too narrow to fit both groups side by side, the layout falls back to packing everything left-to-right and overflowing onto the secondary row.
+- Unknown segment ids and invalid separators are ignored; duplicates are removed while preserving first-seen order.
+- Any field you omit falls back to the built-in `custom` preset's value.
+- Per-segment options (`model`, `path`, `git`, `time`) still work alongside this.
+
 ## Segments
 
-`model` · `thinking` · `shell_mode` · `path` · `git` · `subagents` · `token_in` · `token_out` · `token_total` · `cost` · `context_pct` · `context_total` · `time_spent` · `time` · `session` · `hostname` · `cache_read` · `cache_write`
+`model` · `thinking` · `shell_mode` · `path` · `git` · `subagents` · `token_in` · `token_out` · `token_total` · `cost` · `context_pct` · `context_total` · `time_spent` · `time` · `session` · `hostname` · `cache_read` · `cache_write` · `extension_statuses`
 
 ## Separators
 
@@ -360,6 +442,7 @@ Colors are configurable via pi's theme system. Each preset defines its own color
 | `context` | `dim` | Context usage |
 | `contextWarn` | `warning` | Context usage >70% |
 | `contextError` | `error` | Context usage >90% |
+| `context_pct` | `context` | Whole-number context usage (`17%/272k`) |
 | `cost` | `text` | Cost display |
 | `tokens` | `muted` | Token counts |
 

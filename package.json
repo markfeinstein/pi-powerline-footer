@@ -5,8 +5,10 @@
   "type": "module",
   "files": [
     "*.ts",
-    "*.md",
+    "README.md",
+    "CHANGELOG.md",
     "*.json",
+    "banner.png",
     "!progress.md",
     "bash-mode/**/*.ts",
     "fixed-editor/**/*.ts"
@@ -21,22 +23,26 @@
   ],
   "author": "Nico Bailon",
   "license": "MIT",
+  "engines": {
+    "node": ">=22.19.0"
+  },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/nicobailon/pi-powerline-footer.git"
   },
   "scripts": {
-    "test": "node --experimental-strip-types --test tests/**/*.test.ts"
+    "test": "node --experimental-strip-types --test tests/**/*.test.ts",
+    "pack:check": "npm pack --dry-run --json | node scripts/validate-pack.mjs"
   },
   "peerDependencies": {
-    "@earendil-works/pi-ai": ">=0.74.0 <0.77.0",
-    "@earendil-works/pi-coding-agent": ">=0.74.0 <0.77.0",
-    "@earendil-works/pi-tui": ">=0.74.0 <0.77.0"
+    "@earendil-works/pi-ai": ">=0.79.0 <0.80.0",
+    "@earendil-works/pi-coding-agent": ">=0.79.0 <0.80.0",
+    "@earendil-works/pi-tui": ">=0.79.0 <0.80.0"
   },
   "devDependencies": {
-    "@earendil-works/pi-ai": ">=0.74.0 <0.77.0",
-    "@earendil-works/pi-coding-agent": ">=0.74.0 <0.77.0",
-    "@earendil-works/pi-tui": ">=0.74.0 <0.77.0"
+    "@earendil-works/pi-ai": "0.79.1",
+    "@earendil-works/pi-coding-agent": "0.79.1",
+    "@earendil-works/pi-tui": "0.79.1"
   },
   "pi": {
     "extensions": [

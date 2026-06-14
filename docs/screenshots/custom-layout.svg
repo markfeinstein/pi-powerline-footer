@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="240" viewBox="0 0 1280 240">
+<rect width="100%" height="100%" fill="#0b0f14"/>
+<style>.t{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;fill:#e8eef7}.muted{fill:#9aa7b8}.bar{fill:#111827;stroke:#334155;stroke-width:1}</style>
+<text class="t" x="32" y="36" font-size="24" font-weight="700">Custom layout screenshot</text>
+<text class="t muted" x="32" y="62" font-size="16">preset: custom · current docs sample</text>
+<rect class="bar" x="32" y="84" rx="12" ry="12" width="1216" height="92"/>
+<text class="t" x="52" y="124" font-size="22">π  git ▸ path ▸ model ▸ think ▸ cache       17%/272k</text>
+<text class="t muted" x="52" y="152" font-size="16">extension_statuses</text>
+</svg>

@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="420" viewBox="0 0 1280 420">
+<rect width="100%" height="100%" fill="#0b0f14"/>
+<style>.t{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;fill:#e8eef7}.muted{fill:#9aa7b8}.chip{fill:#17202b;stroke:#2b3a4a;stroke-width:1}.bar{fill:#111827;stroke:#334155;stroke-width:1}</style>
+<text class="t" x="32" y="24" font-size="24" font-weight="700">Default preset </text>
+<text class="t muted" x="32" y="50" font-size="16">preset: default </text>
+<rect class="bar" x="32" y="66" rx="12" ry="12" width="1216" height="92"/>
+<text class="t" x="52" y="106" font-size="22">π  main   shell ▸ path ▸ git                 12%/272k  5m </text>
+<text class="t muted" x="52" y="134" font-size="16">context_total · time_spent · time </text>
+<text class="t" x="32" y="204" font-size="24" font-weight="700">Custom layout </text>
+<text class="t muted" x="32" y="230" font-size="16">preset: custom
+custom: git | path | model | thinking   /   time_spent </text>
+<rect class="bar" x="32" y="246" rx="12" ry="12" width="1216" height="92"/>
+<text class="t" x="52" y="286" font-size="22">π  git ▸ path ▸ model ▸ think ▸ cache       17%/272k </text>
+<text class="t muted" x="52" y="314" font-size="16">extension_statuses </text>
+</svg>

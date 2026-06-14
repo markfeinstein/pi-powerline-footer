@@ -31,6 +31,8 @@ function quoteForTestShell(value: string): string {
   return `'${value.replace(/'/g, `'"'"'`)}'`;
 }
 
+const managedShellPath = existsSync("/bin/zsh") ? "/bin/zsh" : "/bin/bash";
+
 function runGitForTest(cwd: string, args: string[]): void {
   const result = spawnSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
   assert.equal(result.status, 0, result.stderr || result.stdout);
@@ -898,7 +900,7 @@ test("managed shell session preserves cwd changes across commands", async () => 
   const childDir = join(cwd, "child:with:colon");
   mkdirSync(childDir, { recursive: true });
   const store = new BashTranscriptStore({ transcriptMaxLines: 100, transcriptMaxBytes: 64 * 1024 });
-  const session = new ManagedShellSession("/bin/zsh", cwd, store, () => {}, () => {});
+  const session = new ManagedShellSession(managedShellPath, cwd, store, () => {}, () => {});
 
   try {
     await session.ensureReady();
@@ -954,7 +956,7 @@ test("managed shell session starts with POSIX sh fallback", async () => {
 test("managed shell session completes commands with no trailing output newline", async () => {
   const cwd = mkdtempSync(join(tmpdir(), "powerline-shell-no-newline-"));
   const store = new BashTranscriptStore({ transcriptMaxLines: 100, transcriptMaxBytes: 64 * 1024 });
-  const session = new ManagedShellSession("/bin/zsh", cwd, store, () => {}, () => {});
+  const session = new ManagedShellSession(managedShellPath, cwd, store, () => {}, () => {});
 
   const waitForCommand = async () => {
     const start = Date.now();
@@ -980,7 +982,7 @@ test("managed shell session completes commands with no trailing output newline",
 test("managed shell session treats spoofed sentinels as command output", async () => {
   const cwd = mkdtempSync(join(tmpdir(), "powerline-shell-spoof-"));
   const store = new BashTranscriptStore({ transcriptMaxLines: 100, transcriptMaxBytes: 64 * 1024 });
-  const session = new ManagedShellSession("/bin/zsh", cwd, store, () => {}, () => {});
+  const session = new ManagedShellSession(managedShellPath, cwd, store, () => {}, () => {});
 
   const waitForCommand = async () => {
     const start = Date.now();
@@ -1007,7 +1009,7 @@ test("managed shell session treats spoofed sentinels as command output", async (
 test("managed shell session removes temp command scripts on dispose", async () => {
   const cwd = mkdtempSync(join(tmpdir(), "powerline-shell-cleanup-"));
   const store = new BashTranscriptStore({ transcriptMaxLines: 100, transcriptMaxBytes: 64 * 1024 });
-  const session = new ManagedShellSession("/bin/zsh", cwd, store, () => {}, () => {});
+  const session = new ManagedShellSession(managedShellPath, cwd, store, () => {}, () => {});
   const tempDir = Reflect.get(session, "tempDir") as string;
 
   await session.ensureReady();
@@ -1022,7 +1024,7 @@ test("managed shell session cleanup ignores command-mutated script path variable
   const victimPath = join(cwd, "victim.txt");
   writeFileSync(victimPath, "keep\n");
   const store = new BashTranscriptStore({ transcriptMaxLines: 100, transcriptMaxBytes: 64 * 1024 });
-  const session = new ManagedShellSession("/bin/zsh", cwd, store, () => {}, () => {});
+  const session = new ManagedShellSession(managedShellPath, cwd, store, () => {}, () => {});
   const tempDir = Reflect.get(session, "tempDir") as string;
 
   const waitForCommand = async () => {
@@ -1048,7 +1050,7 @@ test("managed shell session cleanup ignores command-mutated script path variable
 test("managed shell session completes after partial stderr output", async () => {
   const cwd = mkdtempSync(join(tmpdir(), "powerline-shell-stderr-"));
   const store = new BashTranscriptStore({ transcriptMaxLines: 100, transcriptMaxBytes: 64 * 1024 });
-  const session = new ManagedShellSession("/bin/zsh", cwd, store, () => {}, () => {});
+  const session = new ManagedShellSession(managedShellPath, cwd, store, () => {}, () => {});
 
   const waitForCommand = async () => {
     const start = Date.now();
@@ -1074,7 +1076,7 @@ test("managed shell session completes after partial stderr output", async () => 
 test("managed shell session recovers cleanly after interrupt", async () => {
   const cwd = mkdtempSync(join(tmpdir(), "powerline-shell-interrupt-"));
   const store = new BashTranscriptStore({ transcriptMaxLines: 100, transcriptMaxBytes: 64 * 1024 });
-  const session = new ManagedShellSession("/bin/zsh", cwd, store, () => {}, () => {});
+  const session = new ManagedShellSession(managedShellPath, cwd, store, () => {}, () => {});
 
   const waitForCommand = async () => {
     const start = Date.now();
