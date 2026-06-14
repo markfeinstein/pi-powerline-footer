@@ -28,6 +28,8 @@ const GIT_SUBCOMMANDS = [
   "grep", "init", "log", "merge", "mv", "pull", "push", "rebase", "reset", "restore", "revert", "rm",
   "show", "stash", "status", "switch", "tag", "worktree",
 ];
+const GIT_REF_CACHE_TTL_MS = 5_000;
+const gitRefsCache = new Map<string, { at: number; refs: string[] }>();
 
 function tokenizeBeforeCursor(text: string): string[] {
   const tokens: string[] = [];
@@ -96,6 +98,10 @@ function getTokenContext(line: string, cursorCol: number): TokenContext {
     tokenEnd = i + 1;
   }
 
+  const tokenIndex = beforeCursor.length > 0 && /\s/.test(beforeCursor[beforeCursor.length - 1] ?? "")
+    ? tokens.length
+    : Math.max(0, tokens.length - 1);
+
   return {
     line,
     cursorCol,
@@ -104,7 +110,7 @@ function getTokenContext(line: string, cursorCol: number): TokenContext {
     token: line.slice(tokenStart, tokenEnd),
     tokenStart,
     tokenEnd,
-    tokenIndex: Math.max(0, tokens.length - 1),
+    tokenIndex,
     previousTokens: tokens,
   };
 }
@@ -223,6 +229,22 @@ function runGit(args: string[], cwd: string): string[] {
   }
 }
 
+function getGitRefs(cwd: string): string[] {
+  const now = Date.now();
+  const cached = gitRefsCache.get(cwd);
+  if (cached && now - cached.at < GIT_REF_CACHE_TTL_MS) {
+    return cached.refs;
+  }
+
+  const refs = [
+    ...runGit(["branch", "--format=%(refname:short)"], cwd),
+    ...runGit(["tag", "--list"], cwd),
+  ];
+  const deduped = [...new Set(refs)];
+  gitRefsCache.set(cwd, { at: now, refs: deduped });
+  return deduped;
+}
+
 function getGitSuggestions(ctx: TokenContext, cwd: string): ExtendedCompletionItem[] {
   const tokens = ctx.previousTokens;
   if (tokens[0] !== "git") return [];
@@ -246,12 +268,7 @@ function getGitSuggestions(ctx: TokenContext, cwd: string): ExtendedCompletionIt
     return [];
   }
 
-  const refs = [
-    ...runGit(["branch", "--format=%(refname:short)"], cwd),
-    ...runGit(["tag", "--list"], cwd),
-  ];
-
-  return [...new Set(refs)]
+  return getGitRefs(cwd)
     .filter((ref) => ref.startsWith(ctx.token))
     .slice(0, 100)
     .map((ref) => ({

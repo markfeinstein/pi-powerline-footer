@@ -1,4 +1,4 @@
-import { readdirSync, existsSync, statSync, readFileSync } from "node:fs";
+import { readdirSync, existsSync, lstatSync, readFileSync } from "node:fs";
 import { join, basename } from "node:path";
 import { homedir as osHomedir } from "node:os";
 import type { Component } from "@earendil-works/pi-tui";
@@ -312,7 +312,12 @@ export class WelcomeHeader implements Component {
 // Discovery functions
 // ═══════════════════════════════════════════════════════════════════════════
 
+const MAX_DISCOVERY_SETTINGS_FILE_BYTES = 256 * 1024;
 const loggedDiscoveryErrors = new Set<string>();
+
+function isFileNotFoundError(error: unknown): boolean {
+  return typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT";
+}
 
 function logDiscoveryError(scope: string, error: unknown): void {
   const message = error instanceof Error ? error.message : String(error);
@@ -327,6 +332,26 @@ function logDiscoveryError(scope: string, error: unknown): void {
   }
 
   console.debug(`[powerline-welcome] ${scope}:`, error);
+}
+
+function readDiscoverySettings(settingsPath: string): Record<string, unknown> | null {
+  try {
+    const stats = lstatSync(settingsPath);
+    if (!stats.isFile() || stats.size > MAX_DISCOVERY_SETTINGS_FILE_BYTES) {
+      console.debug(`[powerline-welcome] Ignoring unsafe settings path at ${settingsPath}`);
+      return null;
+    }
+
+    const parsed = JSON.parse(readFileSync(settingsPath, "utf-8"));
+    return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : null;
+  } catch (error) {
+    if (!isFileNotFoundError(error)) {
+      logDiscoveryError(`Failed to read settings at ${settingsPath}`, error);
+    }
+    return null;
+  }
 }
 
 /**
@@ -350,7 +375,14 @@ export function discoverLoadedCounts(): LoadedCounts {
   ];
   
   for (const path of agentsMdPaths) {
-    if (existsSync(path)) contextFiles++;
+    try {
+      const stats = lstatSync(path);
+      if (stats.isFile() && !stats.isSymbolicLink()) contextFiles++;
+    } catch (error) {
+      if (!isFileNotFoundError(error)) {
+        logDiscoveryError(`Failed to inspect context file ${path}`, error);
+      }
+    }
   }
 
   const extensionDirs = [
@@ -367,55 +399,44 @@ export function discoverLoadedCounts(): LoadedCounts {
   ];
 
   for (const settingsPath of settingsPaths) {
-    if (!existsSync(settingsPath)) {
-      continue;
-    }
+    const settings = readDiscoverySettings(settingsPath);
+    const packages = settings?.packages;
 
-    try {
-      const settings = JSON.parse(readFileSync(settingsPath, "utf-8"));
-      let packages: unknown = null;
-      if (typeof settings === "object" && settings !== null && !Array.isArray(settings)) {
-        packages = (settings as { packages?: unknown }).packages;
-      }
+    if (Array.isArray(packages)) {
+      for (const pkg of packages) {
+        let source: unknown = null;
+        let extensionsFilter: unknown = null;
 
-      if (Array.isArray(packages)) {
-        for (const pkg of packages) {
-          let source: unknown = null;
-          let extensionsFilter: unknown = null;
-
-          if (typeof pkg === "string") {
-            source = pkg;
-          } else if (typeof pkg === "object" && pkg !== null && !Array.isArray(pkg)) {
-            source = (pkg as { source?: unknown }).source;
-            extensionsFilter = (pkg as { extensions?: unknown }).extensions;
-          }
-
-          if (typeof source !== "string") {
-            continue;
-          }
-
-          const normalizedSource = source.trim();
-          if (!normalizedSource.startsWith("npm:")) {
-            continue;
-          }
-
-          if (Array.isArray(extensionsFilter) && extensionsFilter.length === 0) {
-            continue;
-          }
-
-          const body = normalizedSource.slice(4);
-          const versionIndex = body.lastIndexOf("@");
-          const name = versionIndex > 0 ? body.slice(0, versionIndex) : body;
-          if (!name || countedExtensions.has(name)) {
-            continue;
-          }
-
-          countedExtensions.add(name);
-          extensions++;
+        if (typeof pkg === "string") {
+          source = pkg;
+        } else if (typeof pkg === "object" && pkg !== null && !Array.isArray(pkg)) {
+          source = (pkg as { source?: unknown }).source;
+          extensionsFilter = (pkg as { extensions?: unknown }).extensions;
         }
+
+        if (typeof source !== "string") {
+          continue;
+        }
+
+        const normalizedSource = source.trim();
+        if (!normalizedSource.startsWith("npm:")) {
+          continue;
+        }
+
+        if (Array.isArray(extensionsFilter) && extensionsFilter.length === 0) {
+          continue;
+        }
+
+        const body = normalizedSource.slice(4);
+        const versionIndex = body.lastIndexOf("@");
+        const name = versionIndex > 0 ? body.slice(0, versionIndex) : body;
+        if (!name || countedExtensions.has(name)) {
+          continue;
+        }
+
+        countedExtensions.add(name);
+        extensions++;
       }
-    } catch (error) {
-      logDiscoveryError(`Failed to read settings at ${settingsPath}`, error);
     }
   }
 
@@ -427,7 +448,8 @@ export function discoverLoadedCounts(): LoadedCounts {
           const entryPath = join(dir, entry);
 
           try {
-            const stats = statSync(entryPath);
+            const stats = lstatSync(entryPath);
+            if (stats.isSymbolicLink()) continue;
 
             if (stats.isDirectory()) {
               if (
@@ -473,7 +495,9 @@ export function discoverLoadedCounts(): LoadedCounts {
         for (const entry of entries) {
           const entryPath = join(dir, entry);
           try {
-            if (statSync(entryPath).isDirectory()) {
+            const stats = lstatSync(entryPath);
+            if (stats.isSymbolicLink()) continue;
+            if (stats.isDirectory()) {
               if (existsSync(join(entryPath, "SKILL.md"))) {
                 if (!countedSkills.has(entry)) {
                   countedSkills.add(entry);
@@ -507,7 +531,8 @@ export function discoverLoadedCounts(): LoadedCounts {
       for (const entry of entries) {
         const entryPath = join(dir, entry);
         try {
-          const stats = statSync(entryPath);
+          const stats = lstatSync(entryPath);
+          if (stats.isSymbolicLink()) continue;
           if (stats.isDirectory()) {
             countTemplatesInDir(entryPath);
           } else if (entry.endsWith(".md")) {
@@ -553,7 +578,8 @@ export function getRecentSessions(maxCount: number = 3): RecentSession[] {
       for (const entry of entries) {
         const entryPath = join(dir, entry);
         try {
-          const stats = statSync(entryPath);
+          const stats = lstatSync(entryPath);
+          if (stats.isSymbolicLink()) continue;
           if (stats.isDirectory()) {
             scanDir(entryPath);
           } else if (entry.endsWith(".jsonl")) {

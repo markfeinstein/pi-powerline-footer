@@ -9,17 +9,43 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 export function readCoreContextUsage(ctx: unknown): CoreContextUsage | null {
-  if (!isRecord(ctx) || typeof ctx.getContextUsage !== "function") {
+  if (!isRecord(ctx)) {
     return null;
   }
 
-  const usage = ctx.getContextUsage();
+  let getContextUsage: unknown;
+  try {
+    getContextUsage = ctx.getContextUsage;
+  } catch {
+    return null;
+  }
+
+  if (typeof getContextUsage !== "function") {
+    return null;
+  }
+
+  let usage: unknown;
+  try {
+    usage = getContextUsage.call(ctx);
+  } catch {
+    return null;
+  }
+
   if (!isRecord(usage)) {
     return null;
   }
 
-  const tokens = usage.tokens;
-  const contextWindow = usage.contextWindow;
+  let tokens: unknown;
+  let contextWindow: unknown;
+  let percent: unknown;
+  try {
+    tokens = usage.tokens;
+    contextWindow = usage.contextWindow;
+    percent = usage.percent;
+  } catch {
+    return null;
+  }
+
   if (
     typeof tokens !== "number"
     || !Number.isFinite(tokens)
@@ -29,8 +55,6 @@ export function readCoreContextUsage(ctx: unknown): CoreContextUsage | null {
   ) {
     return null;
   }
-
-  const percent = usage.percent;
   return {
     contextTokens: tokens,
     contextWindow,

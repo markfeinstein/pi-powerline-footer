@@ -1,6 +1,6 @@
 import { fileURLToPath } from "node:url";
 import { CustomEditor } from "@earendil-works/pi-coding-agent";
-import { isKeyRelease, matchesKey, visibleWidth, truncateToWidth } from "@earendil-works/pi-tui";
+import { isKeyRelease, visibleWidth, truncateToWidth } from "@earendil-works/pi-tui";
 import type { KeybindingsManager } from "@earendil-works/pi-coding-agent/dist/core/keybindings.js";
 import type { AutocompleteProvider } from "@earendil-works/pi-tui";
 import { matchesConfiguredShortcut } from "../shortcuts.ts";
@@ -71,7 +71,7 @@ function decodeFileUriList(text: string): string | null {
   }
 }
 
-function droppedPathTextFromInput(data: string): string | null {
+export function droppedPathTextFromInput(data: string): string | null {
   const pasteContent = bracketedPasteContent(data);
   const text = pasteContent ?? data;
   const uriList = decodeFileUriList(text);
@@ -235,6 +235,25 @@ export class BashModeEditor extends CustomEditor {
         }
       }
 
+      if (!bashMode && this.keybindingsRef.matches(data, "tui.editor.cursorUp") && !this.isShowingAutocomplete()) {
+        const history = Reflect.get(this, "history");
+        const historyIndex = Reflect.get(this, "historyIndex");
+        const isOnFirstVisualLine = Reflect.get(this, "isOnFirstVisualLine");
+        const moveToLineStart = Reflect.get(this, "moveToLineStart");
+        if (
+          historyIndex === -1
+          &&
+          Array.isArray(history)
+          && history.length > 0
+          && typeof isOnFirstVisualLine === "function"
+          && isOnFirstVisualLine.call(this)
+          && typeof moveToLineStart === "function"
+        ) {
+          moveToLineStart.call(this);
+          return;
+        }
+      }
+
       if (!bashMode && this.keybindingsRef.matches(data, "tui.editor.cursorDown") && Reflect.get(this, "historyIndex") > -1) {
         const isOnLastVisualLine = Reflect.get(this, "isOnLastVisualLine");
         if (typeof isOnLastVisualLine !== "function" || isOnLastVisualLine.call(this)) {
@@ -346,7 +365,8 @@ export class BashModeEditor extends CustomEditor {
     const state = Reflect.get(this, "state");
     const lines = state && typeof state === "object" ? Reflect.get(state, "lines") : null;
     if (!Array.isArray(lines)) {
-      throw new Error("Editor cursor state is unavailable");
+      this.optionsRef.onNotify("Editor cursor state is unavailable", "warning");
+      return;
     }
 
     if (position === "start") {

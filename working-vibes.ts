@@ -4,7 +4,7 @@
 
 import { complete, type Context } from "@earendil-works/pi-ai";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync, mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { homedir } from "node:os";
 
@@ -56,6 +56,13 @@ interface VibeGenContext {
 // Module-level State
 // ═══════════════════════════════════════════════════════════════════════════
 
+// Settings are user-edited input. Cap how much we are willing to parse so a huge or
+// corrupted ~/.pi/agent/settings.json cannot stall the extension (mirrors index.ts).
+// Declared before the loadConfig() call below so it is initialized first (no TDZ).
+const MAX_SETTINGS_FILE_BYTES = 256 * 1024;
+const DEFAULT_VIBE_BATCH_COUNT = 100;
+const MAX_VIBE_BATCH_COUNT = 500;
+
 let config: VibeConfig = loadConfig();
 let extensionCtx: ExtensionContext | null = null;
 let currentGeneration: AbortController | null = null;
@@ -76,8 +83,13 @@ let recentVibes: string[] = [];
 // Configuration Management
 // ═══════════════════════════════════════════════════════════════════════════
 
-function getSettingsPath(): string {
+function getHomeDir(): string {
   const homeDir = process.env.HOME || process.env.USERPROFILE || homedir();
+  return homeDir;
+}
+
+function getSettingsPath(): string {
+  const homeDir = getHomeDir();
   return join(homeDir, ".pi", "agent", "settings.json");
 }
 
@@ -90,6 +102,12 @@ function readSettingsForLoad(): Record<string, unknown> {
 
   try {
     if (!existsSync(settingsPath)) {
+      return {};
+    }
+
+    const stats = statSync(settingsPath);
+    if (!stats.isFile() || stats.size > MAX_SETTINGS_FILE_BYTES) {
+      console.debug(`[working-vibes] Ignoring unsafe settings path at ${settingsPath}`);
       return {};
     }
 
@@ -109,11 +127,17 @@ function readSettingsForLoad(): Record<string, unknown> {
 function readSettingsForWrite(scope: string): Record<string, unknown> | null {
   const settingsPath = getSettingsPath();
 
-  if (!existsSync(settingsPath)) {
-    return {};
-  }
-
   try {
+    const stats = lstatSync(settingsPath);
+    if (!stats.isFile()) {
+      console.debug(`[working-vibes] Refusing to write ${scope}: settings at ${settingsPath} is not a file`);
+      return null;
+    }
+    if (stats.size > MAX_SETTINGS_FILE_BYTES) {
+      console.debug(`[working-vibes] Refusing to write ${scope}: settings at ${settingsPath} is too large`);
+      return null;
+    }
+
     const parsed = JSON.parse(readFileSync(settingsPath, "utf-8"));
     if (!isRecord(parsed)) {
       console.debug(`[working-vibes] Refusing to write ${scope}: settings at ${settingsPath} is not an object`);
@@ -122,6 +146,10 @@ function readSettingsForWrite(scope: string): Record<string, unknown> | null {
 
     return parsed;
   } catch (error) {
+    if (isFileNotFoundError(error)) {
+      return {};
+    }
+
     console.debug(`[working-vibes] Failed to parse settings while writing ${scope} at ${settingsPath}:`, error);
     return null;
   }
@@ -131,12 +159,107 @@ function persistSettings(settings: Record<string, unknown>, scope: string): bool
   const settingsPath = getSettingsPath();
 
   try {
-    mkdirSync(dirname(settingsPath), { recursive: true });
-    writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + "\n");
-    return true;
+    if (!canWriteWithinAgentPath(settingsPath)) {
+      console.debug(`[working-vibes] Refusing to persist ${scope}: settings path ${settingsPath} has an unsafe parent`);
+      return false;
+    }
+
+    if (pathExistsOrIsDanglingSymlink(settingsPath) && !lstatSync(settingsPath).isFile()) {
+      console.debug(`[working-vibes] Refusing to persist ${scope}: settings at ${settingsPath} is not a file`);
+      return false;
+    }
+
+    return atomicWriteFile(settingsPath, JSON.stringify(settings, null, 2) + "\n", scope);
   } catch (error) {
     console.debug(`[working-vibes] Failed to persist ${scope} to ${settingsPath}:`, error);
     return false;
+  }
+}
+
+// Write atomically via a temp file + rename so an interrupted or concurrent
+// write can never truncate/corrupt the shared settings or vibe file, and so a
+// symlink swapped in after validation cannot redirect the write to an
+// arbitrary target (rename replaces the symlink itself rather than following
+// it). Mirrors the hardening used in index.ts writePowerlineSetting().
+function atomicWriteFile(targetPath: string, contents: string, scope: string): boolean {
+  let tempPath = "";
+  try {
+    mkdirSync(dirname(targetPath), { recursive: true });
+    tempPath = `${targetPath}.${process.pid}.${Date.now()}.tmp`;
+    writeFileSync(tempPath, contents, { flag: "wx" });
+    try {
+      if (lstatSync(targetPath).isSymbolicLink()) {
+        console.debug(`[working-vibes] Refusing to replace symlinked path while writing ${scope} at ${targetPath}`);
+        unlinkSync(tempPath);
+        tempPath = "";
+        return false;
+      }
+    } catch (error) {
+      if (!isFileNotFoundError(error)) {
+        unlinkSync(tempPath);
+        tempPath = "";
+        throw error;
+      }
+    }
+    renameSync(tempPath, targetPath);
+    tempPath = "";
+    return true;
+  } catch (error) {
+    if (tempPath) {
+      try {
+        unlinkSync(tempPath);
+      } catch {
+        // best effort cleanup
+      }
+    }
+    console.debug(`[working-vibes] Failed to write ${scope} to ${targetPath}:`, error);
+    return false;
+  }
+}
+
+function pathExistsOrIsDanglingSymlink(filePath: string): boolean {
+  try {
+    lstatSync(filePath);
+    return true;
+  } catch (error) {
+    return !isFileNotFoundError(error);
+  }
+}
+
+function isFileNotFoundError(error: unknown): boolean {
+  return isRecord(error) && error.code === "ENOENT";
+}
+
+function isSafeWritableDirectoryPath(dirPath: string): boolean {
+  try {
+    const stats = lstatSync(dirPath);
+    return stats.isDirectory();
+  } catch (error) {
+    return isFileNotFoundError(error);
+  }
+}
+
+function canWriteWithinAgentPath(filePath: string): boolean {
+  const piDir = join(getHomeDir(), ".pi");
+  const agentDir = join(piDir, "agent");
+  const targetDir = dirname(filePath);
+  if (!isSafeWritableDirectoryPath(piDir) || !isSafeWritableDirectoryPath(agentDir)) return false;
+
+  // Allow writes directly under ~/.pi/agent or under ~/.pi/agent/vibes even if
+  // the vibes directory does not exist yet. atomicWriteFile() creates the parent
+  // directory after the path has been validated.
+  if (targetDir === agentDir) return true;
+
+  const vibesDir = join(agentDir, "vibes");
+  return targetDir === vibesDir;
+}
+
+function canWriteRegularFilePath(filePath: string): boolean {
+  try {
+    const stats = lstatSync(filePath);
+    return stats.isFile();
+  } catch (error) {
+    return isFileNotFoundError(error);
   }
 }
 
@@ -203,6 +326,33 @@ function saveModelConfig(): boolean {
   return persistSettings(settings, "workingVibeModel");
 }
 
+function normalizeVibeBatchCount(count: unknown): number {
+  return typeof count === "number" && Number.isFinite(count)
+    ? Math.min(Math.max(Math.floor(count), 1), MAX_VIBE_BATCH_COUNT)
+    : DEFAULT_VIBE_BATCH_COUNT;
+}
+
+export interface ParsedVibeGenerateArgs {
+  theme: string;
+  count: number;
+}
+
+export function parseVibeGenerateArgs(args: readonly string[]): ParsedVibeGenerateArgs | null {
+  const tokens = args.map((arg) => arg.trim()).filter((arg) => arg.length > 0);
+  if (tokens.length === 0) return null;
+
+  const lastToken = tokens[tokens.length - 1] ?? "";
+  const parsedCount = Number.parseInt(lastToken, 10);
+  const hasExplicitCount = tokens.length > 1 && Number.isFinite(parsedCount);
+  const theme = (hasExplicitCount ? tokens.slice(0, -1) : tokens).join(" ").trim();
+  if (!theme) return null;
+
+  return {
+    theme,
+    count: hasExplicitCount ? normalizeVibeBatchCount(parsedCount) : DEFAULT_VIBE_BATCH_COUNT,
+  };
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // File-Based Vibe Management
 // ═══════════════════════════════════════════════════════════════════════════
@@ -230,9 +380,9 @@ function getVibeFilePath(theme: string): string {
 
 function loadVibesFromFile(theme: string): string[] {
   const filePath = getVibeFilePath(theme);
-  if (!existsSync(filePath)) return [];
-  
+
   try {
+    if (!canWriteWithinAgentPath(filePath) || !lstatSync(filePath).isFile()) return [];
     const content = readFileSync(filePath, "utf-8");
     return content
       .split("\n")
@@ -245,15 +395,19 @@ function loadVibesFromFile(theme: string): string[] {
 }
 
 function saveVibesToFile(theme: string, vibes: string[]): void {
-  const vibesDir = getVibesDir();
   const filePath = getVibeFilePath(theme);
-  
-  // Ensure directory exists
-  if (!existsSync(vibesDir)) {
-    mkdirSync(vibesDir, { recursive: true });
+
+  if (!canWriteWithinAgentPath(filePath)) {
+    throw new Error(`Refusing to write vibe file through unsafe path: ${filePath}`);
   }
-  
-  writeFileSync(filePath, vibes.join("\n"));
+
+  if (pathExistsOrIsDanglingSymlink(filePath) && !canWriteRegularFilePath(filePath)) {
+    throw new Error(`Refusing to write vibe file through unsafe path: ${filePath}`);
+  }
+
+  if (!atomicWriteFile(filePath, vibes.join("\n"), "vibe file")) {
+    throw new Error(`Refusing to write vibe file through unsafe path: ${filePath}`);
+  }
 }
 
 // Mulberry32 PRNG - fast, deterministic, good distribution
@@ -592,7 +746,16 @@ function saveModeConfig(): boolean {
 }
 
 export function hasVibeFile(theme: string): boolean {
-  return existsSync(getVibeFilePath(theme));
+  const filePath = getVibeFilePath(theme);
+
+  try {
+    return canWriteWithinAgentPath(filePath) && lstatSync(filePath).isFile();
+  } catch (error) {
+    if (!isFileNotFoundError(error)) {
+      console.debug(`[working-vibes] Failed to check vibe file ${filePath}:`, error);
+    }
+    return false;
+  }
 }
 
 export function getVibeFileCount(theme: string): number {
@@ -612,7 +775,7 @@ export async function generateVibesBatch(
   count: number = 100,
 ): Promise<GenerateVibesResult> {
   const filePath = getVibeFilePath(theme);
-  const safeCount = Number.isFinite(count) ? Math.min(Math.max(Math.floor(count), 1), 500) : 100;
+  const safeCount = normalizeVibeBatchCount(count);
   
   if (!extensionCtx) {
     return { success: false, count: 0, filePath, error: "Extension not initialized" };
@@ -659,7 +822,7 @@ export async function generateVibesBatch(
     }
     
     // Parse response: one vibe per line
-    const vibes = textContent.text
+    const parsedVibes = textContent.text
       .split("\n")
       .map(line => line.trim())
       .filter(line => line.length > 0)
@@ -673,6 +836,7 @@ export async function generateVibesBatch(
         return vibe;
       })
       .filter(vibe => vibe.length > 3 && vibe !== "...");  // Filter invalid
+    const vibes = [...new Set(parsedVibes)].slice(0, safeCount);
     
     if (vibes.length === 0) {
       return { success: false, count: 0, filePath, error: "No valid vibes generated" };

@@ -338,6 +338,7 @@ export class TerminalSplitCompositor {
   private readonly originalRender: ((width: number) => string[]) | null;
   private originalCompositeLineAt: CompositeLineAt | null = null;
   private readonly patchedRenders: RenderPatch[] = [];
+  private hiddenRenderCache = new WeakMap<PatchedRenderable, Map<number, string[]>>();
   private removeInputListener: (() => void) | null = null;
   private emergencyCleanup: (() => void) | null = null;
   private mouseReportingResumeTimer: ReturnType<typeof setTimeout> | null = null;
@@ -353,6 +354,7 @@ export class TerminalSplitCompositor {
   private scrollOffset = 0;
   private maxScrollOffset = 0;
   private lastRootLineCount = 0;
+  private lastRawRowsForRender: number | null = null;
   private rootLines: string[] = [];
   private visibleRootStart = 0;
   private visibleScrollableRows = 0;
@@ -419,12 +421,16 @@ export class TerminalSplitCompositor {
       this.tui.doRender = () => {
         this.renderPassActive = true;
         this.renderPassCluster = null;
+        this.hiddenRenderCache = new WeakMap<PatchedRenderable, Map<number, string[]>>();
         try {
+          this.suppressSyntheticTuiHeightChange();
           this.originalDoRender?.();
+          this.lastRawRowsForRender = this.getRawRows();
           this.requestRepaint();
         } finally {
           this.renderPassActive = false;
           this.renderPassCluster = null;
+          this.hiddenRenderCache = new WeakMap<PatchedRenderable, Map<number, string[]>>();
         }
       };
     }
@@ -457,7 +463,23 @@ export class TerminalSplitCompositor {
   renderHidden(target: PatchedRenderable, width: number): string[] {
     const patch = this.patchedRenders.find((candidate) => candidate.target === target);
     const render = patch?.originalRender ?? target.render.bind(target);
-    return render(width);
+
+    if (!this.renderPassActive) {
+      return render(width);
+    }
+
+    const cachedWidths = this.hiddenRenderCache.get(target);
+    const cached = cachedWidths?.get(width);
+    if (cached) return cached;
+
+    const rendered = render(width);
+    let widths = cachedWidths;
+    if (!widths) {
+      widths = new Map<number, string[]>();
+      this.hiddenRenderCache.set(target, widths);
+    }
+    widths.set(width, rendered);
+    return rendered;
   }
 
   jumpToPreviousRootTarget(targetLines: readonly number[]): boolean {
@@ -483,26 +505,32 @@ export class TerminalSplitCompositor {
     if (this.disposed || targetLines.length === 0 || this.hasVisibleOverlay()) return false;
 
     const start = this.visibleRootStart;
-    const candidates = direction === "previous"
-      ? targetLines.filter((line) => line < start).sort((a, b) => b - a)
-      : targetLines.filter((line) => line > start).sort((a, b) => a - b);
+    let bestTarget = -1;
 
-    for (const target of candidates) {
-      const nextOffset = Math.max(0, Math.min(
-        this.lastRootLineCount - Math.max(1, this.visibleScrollableRows) - target,
-        this.maxScrollOffset,
-      ));
-      if (nextOffset === this.scrollOffset) continue;
-
-      this.clearSelection();
-      this.lastLeftPress = null;
-      this.scrollOffset = nextOffset;
-      this.pendingImageCleanup = true;
-      this.requestRender();
-      return true;
+    for (const target of targetLines) {
+      if (direction === "previous") {
+        if (target >= start) continue;
+        if (bestTarget === -1 || target > bestTarget) bestTarget = target;
+      } else {
+        if (target <= start) continue;
+        if (bestTarget === -1 || target < bestTarget) bestTarget = target;
+      }
     }
 
-    return false;
+    if (bestTarget === -1) return false;
+
+    const nextOffset = Math.max(0, Math.min(
+      this.lastRootLineCount - Math.max(1, this.visibleScrollableRows) - bestTarget,
+      this.maxScrollOffset,
+    ));
+    if (nextOffset === this.scrollOffset) return false;
+
+    this.clearSelection();
+    this.lastLeftPress = null;
+    this.scrollOffset = nextOffset;
+    this.pendingImageCleanup = true;
+    this.requestRender();
+    return true;
   }
 
   requestRepaint(): void {
@@ -567,6 +595,35 @@ export class TerminalSplitCompositor {
 
   private getRawRows(): number {
     return Math.max(2, readRows(this.terminal, this.rowsDescriptor));
+  }
+
+  private suppressSyntheticTuiHeightChange(): void {
+    const rawRows = this.getRawRows();
+    const previousRawRows = this.lastRawRowsForRender;
+
+    if (previousRawRows === null || rawRows !== previousRawRows || this.hasVisibleOverlay()) {
+      this.lastRawRowsForRender = rawRows;
+      return;
+    }
+
+    const previousHeight = Reflect.get(this.tui, "previousHeight");
+    if (typeof previousHeight !== "number" || !Number.isFinite(previousHeight) || previousHeight <= 0) {
+      return;
+    }
+
+    const scrollableRows = this.getScrollableRows();
+    if (previousHeight === scrollableRows) {
+      return;
+    }
+
+    // The compositor gives pi-tui an already-windowed root render whose length
+    // matches the synthetic scrollable row count. If the fixed cluster grows or
+    // shrinks, treating that as a real terminal resize makes pi-tui clear and
+    // redraw the screen, which visibly flashes the status/editor rows. Keep the
+    // root viewport anchored and only update pi-tui's remembered synthetic
+    // height; real terminal row changes still take the normal full-redraw path.
+    Reflect.set(this.tui, "previousViewportTop", 0);
+    Reflect.set(this.tui, "previousHeight", scrollableRows);
   }
 
   private getScrollableRows(): number {

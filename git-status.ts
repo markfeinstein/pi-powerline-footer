@@ -1,4 +1,6 @@
 import { spawn } from "node:child_process";
+import { realpathSync } from "node:fs";
+import { resolve } from "node:path";
 import type { GitStatus } from "./types.ts";
 
 interface CachedGitStatus {
@@ -17,12 +19,21 @@ export type GitPollingMode = "full" | "branch" | "off";
 
 const CACHE_TTL_MS = 1000; // 1 second for file status
 const BRANCH_TTL_MS = 500; // Shorter TTL so branch updates quickly after invalidation
-let cachedStatus: CachedGitStatus | null = null;
-let cachedBranch: CachedBranch | null = null;
-let pendingFetch: Promise<void> | null = null;
-let pendingBranchFetch: Promise<void> | null = null;
+const cachedStatuses = new Map<string, CachedGitStatus>();
+const cachedBranches = new Map<string, CachedBranch>();
+const pendingFetches = new Map<string, Promise<void>>();
+const pendingBranchFetches = new Map<string, Promise<void>>();
 let invalidationCounter = 0; // Track invalidations to prevent stale updates
 let branchInvalidationCounter = 0;
+
+function cacheKey(cwd: string): string {
+  const resolved = resolve(cwd);
+  try {
+    return realpathSync(resolved);
+  } catch {
+    return resolved;
+  }
+}
 
 /**
  * Parse git status --porcelain output
@@ -62,9 +73,10 @@ function parseGitStatusOutput(output: string): { staged: number; unstaged: numbe
   return { staged, unstaged, untracked };
 }
 
-function runGit(args: string[], timeoutMs = 200): Promise<string | null> {
+function runGit(args: string[], cwd: string, timeoutMs = 200): Promise<string | null> {
   return new Promise((resolve) => {
     const proc = spawn("git", args, {
+      cwd,
       stdio: ["ignore", "pipe", "pipe"],
     });
 
@@ -101,20 +113,20 @@ function runGit(args: string[], timeoutMs = 200): Promise<string | null> {
  * Fetch current git branch asynchronously.
  * For detached HEAD, returns the short commit SHA (matches provider's "detached" behavior).
  */
-async function fetchGitBranch(): Promise<string | null> {
-  const branch = await runGit(["branch", "--show-current"]);
+async function fetchGitBranch(cwd: string): Promise<string | null> {
+  const branch = await runGit(["branch", "--show-current"], cwd);
   if (branch === null) return null;
   if (branch) return branch;
 
-  const sha = await runGit(["rev-parse", "--short", "HEAD"]);
+  const sha = await runGit(["rev-parse", "--short", "HEAD"], cwd);
   return sha ? `${sha} (detached)` : "detached";
 }
 
 /**
  * Fetch git status asynchronously
  */
-async function fetchGitStatus(): Promise<{ staged: number; unstaged: number; untracked: number } | null> {
-  const output = await runGit(["status", "--porcelain"], 500);
+async function fetchGitStatus(cwd: string): Promise<{ staged: number; unstaged: number; untracked: number } | null> {
+  const output = await runGit(["status", "--porcelain"], cwd, 500);
   if (output === null) return null;
   return parseGitStatusOutput(output);
 }
@@ -123,8 +135,10 @@ async function fetchGitStatus(): Promise<{ staged: number; unstaged: number; unt
  * Get the current git branch with caching.
  * Falls back to provider branch if our cache is empty.
  */
-export function getCurrentBranch(providerBranch: string | null): string | null {
+export function getCurrentBranch(providerBranch: string | null, cwd = process.cwd()): string | null {
   const now = Date.now();
+  const key = cacheKey(cwd);
+  const cachedBranch = cachedBranches.get(key) ?? null;
 
   // Return cached if fresh
   if (cachedBranch && now - cachedBranch.timestamp < BRANCH_TTL_MS) {
@@ -132,18 +146,19 @@ export function getCurrentBranch(providerBranch: string | null): string | null {
   }
 
   // Trigger background fetch if not already pending
-  if (!pendingBranchFetch) {
+  if (!pendingBranchFetches.has(key)) {
     const fetchId = branchInvalidationCounter;
-    pendingBranchFetch = fetchGitBranch().then((result) => {
+    const pendingBranchFetch = fetchGitBranch(key).then((result) => {
       // Cache result if no invalidation happened (including null for non-git dirs)
       if (fetchId === branchInvalidationCounter) {
-        cachedBranch = {
+        cachedBranches.set(key, {
           branch: result,
           timestamp: Date.now(),
-        };
+        });
       }
-      pendingBranchFetch = null;
+      pendingBranchFetches.delete(key);
     });
+    pendingBranchFetches.set(key, pendingBranchFetch);
   }
 
   // Return stale cache while refreshing; only use provider before first fetch
@@ -156,13 +171,16 @@ export function getCurrentBranch(providerBranch: string | null): string | null {
  * This is designed for synchronous render() calls - returns last known value
  * while refreshing in background.
  */
-export function getGitStatus(providerBranch: string | null, pollingMode: GitPollingMode = "full"): GitStatus {
+export function getGitStatus(providerBranch: string | null, pollingMode: GitPollingMode = "full", cwd = process.cwd()): GitStatus {
   const now = Date.now();
-  const branch = pollingMode === "off" ? providerBranch : getCurrentBranch(providerBranch);
+  const key = cacheKey(cwd);
+  const branch = pollingMode === "off" ? providerBranch : getCurrentBranch(providerBranch, key);
 
   if (pollingMode !== "full") {
     return { branch, staged: 0, unstaged: 0, untracked: 0 };
   }
+
+  const cachedStatus = cachedStatuses.get(key) ?? null;
 
   // Return cached if fresh
   if (cachedStatus && now - cachedStatus.timestamp < CACHE_TTL_MS) {
@@ -175,17 +193,18 @@ export function getGitStatus(providerBranch: string | null, pollingMode: GitPoll
   }
 
   // Trigger background fetch if not already pending
-  if (!pendingFetch) {
+  if (!pendingFetches.has(key)) {
     const fetchId = invalidationCounter; // Capture current counter
-    pendingFetch = fetchGitStatus().then((result) => {
+    const pendingFetch = fetchGitStatus(key).then((result) => {
       // Cache result if no invalidation happened (including null for non-git dirs)
       if (fetchId === invalidationCounter) {
-        cachedStatus = result
+        cachedStatuses.set(key, result
           ? { staged: result.staged, unstaged: result.unstaged, untracked: result.untracked, timestamp: Date.now() }
-          : { staged: 0, unstaged: 0, untracked: 0, timestamp: Date.now() };
+          : { staged: 0, unstaged: 0, untracked: 0, timestamp: Date.now() });
       }
-      pendingFetch = null;
+      pendingFetches.delete(key);
     });
+    pendingFetches.set(key, pendingFetch);
   }
 
   // Return last cached or empty
@@ -205,7 +224,7 @@ export function getGitStatus(providerBranch: string | null, pollingMode: GitPoll
  * Force refresh git status (call when you know files changed)
  */
 export function invalidateGitStatus(): void {
-  cachedStatus = null;
+  cachedStatuses.clear();
   invalidationCounter++; // Increment to invalidate any pending fetches
 }
 
@@ -213,6 +232,6 @@ export function invalidateGitStatus(): void {
  * Force refresh git branch (call when you know branch might have changed)
  */
 export function invalidateGitBranch(): void {
-  cachedBranch = null;
+  cachedBranches.clear();
   branchInvalidationCounter++;
 }

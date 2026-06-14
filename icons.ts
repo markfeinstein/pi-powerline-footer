@@ -8,6 +8,7 @@ export interface IconSet {
   git: string;
   tokens: string;
   context: string;
+  thinking: string;
   cost: string;
   time: string;
   agents: string;
@@ -57,8 +58,9 @@ export const NERD_ICONS: IconSet = {
   branch: "\uF126",     // nf-fa-code_fork (git branch)
   git: "\uF1D3",        // nf-fa-git (git logo)
   tokens: "\uE26B",     // nf-seti-html (tokens symbol)
-  context: "\uE70F",    // nf-dev-database (database)
-  cost: "\uF155",       // nf-fa-dollar
+  context: "\u{F0029}",  // nf-md-gauge (context usage gauge)
+  thinking: "",          // no icon for thinking level
+  cost: "\uF09D",       // nf-fa-credit_card
   time: "\uF017",       // nf-fa-clock_o
   agents: "\uF0C0",     // nf-fa-users
   cache: "\uF1C0",      // nf-fa-database (cache)
@@ -79,6 +81,7 @@ export const ASCII_ICONS: IconSet = {
   git: "⎇",
   tokens: "⊛",
   context: "◫",
+  thinking: "~",
   cost: "$",
   time: "◷",
   agents: "AG",
@@ -153,19 +156,35 @@ export const ASCII_SEPARATORS: SeparatorChars = {
   dot: ".",
 };
 
-// Detect Nerd Font support (check TERM or specific env var)
+// Detect Nerd Font support. Primary control is the powerline config (set via
+// setNerdFontsPreference); the POWERLINE_NERD_FONTS env var is an optional
+// override.
+let configuredNerdFonts: boolean | null = null;
+
+/**
+ * Record the Nerd Font preference coming from powerline config (settings.json).
+ * This is the primary control. Pass `null`/`undefined` to clear it (fall back to
+ * the env var, then the default). The extension keeps this in sync whenever the
+ * powerline config is (re)loaded.
+ */
+export function setNerdFontsPreference(value: boolean | null | undefined): void {
+  configuredNerdFonts = value ?? null;
+}
+
 export function hasNerdFonts(): boolean {
-  // User can set this env var to force Nerd Fonts
-  if (process.env.POWERLINE_NERD_FONTS === "1") return true;
-  if (process.env.POWERLINE_NERD_FONTS === "0") return false;
-  
-  // Check for Ghostty (survives into tmux via GHOSTTY_RESOURCES_DIR)
-  if (process.env.GHOSTTY_RESOURCES_DIR) return true;
-  
-  // Check common terminals known to support Nerd Fonts (case-insensitive)
-  const term = (process.env.TERM_PROGRAM || "").toLowerCase();
-  const nerdTerms = ["iterm", "wezterm", "kitty", "ghostty", "alacritty"];
-  return nerdTerms.some(t => term.includes(t));
+  // The POWERLINE_NERD_FONTS env var is an optional override (an escape hatch for
+  // a specific shell/terminal) and wins whenever it is explicitly set.
+  const override = process.env.POWERLINE_NERD_FONTS;
+  if (override === "1") return true;
+  if (override === "0") return false;
+
+  // Primary control: the powerline config in settings.json.
+  if (configuredNerdFonts !== null) return configuredNerdFonts;
+
+  // Default to Nerd Font glyphs. In practice, the powerline footer is used in
+  // terminals that already ship with a patched font, and falling back to the
+  // ASCII icon set makes many segments look broken/blank.
+  return true;
 }
 
 export function getIcons(): IconSet {

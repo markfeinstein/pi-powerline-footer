@@ -1,7 +1,8 @@
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import type { BashTranscriptStore } from "./transcript.ts";
 import type { ShellSessionState } from "./types.ts";
 
@@ -40,19 +41,53 @@ function getCloseExitCode(code: number | null, signal: NodeJS.Signals | null): n
   return 1;
 }
 
-function getShellInitScript(shellName: string): string {
+function parseReadySentinel(line: string, nonce: string): { cwd: string } | null {
+  const prefix = `${READY_SENTINEL}:${nonce}:`;
+  if (!line.startsWith(prefix)) return null;
+  return { cwd: line.slice(prefix.length) };
+}
+
+function parseCommandStartSentinel(line: string, nonce: string): { id: string; cwd: string } | null {
+  const prefix = `${COMMAND_START_SENTINEL}:${nonce}:`;
+  if (!line.startsWith(prefix)) return null;
+  const rest = line.slice(prefix.length);
+  const separatorIndex = rest.indexOf(":");
+  if (separatorIndex === -1) return null;
+  return {
+    id: rest.slice(0, separatorIndex),
+    cwd: rest.slice(separatorIndex + 1),
+  };
+}
+
+function parseCommandDoneSentinel(line: string, nonce: string): { id: string; exitCodeText: string; cwd: string } | null {
+  const prefix = `${COMMAND_DONE_SENTINEL}:${nonce}:`;
+  if (!line.startsWith(prefix)) return null;
+  const rest = line.slice(prefix.length);
+  const idSeparatorIndex = rest.indexOf(":");
+  if (idSeparatorIndex === -1) return null;
+  const statusAndCwd = rest.slice(idSeparatorIndex + 1);
+  const statusSeparatorIndex = statusAndCwd.indexOf(":");
+  if (statusSeparatorIndex === -1) return null;
+  return {
+    id: rest.slice(0, idSeparatorIndex),
+    exitCodeText: statusAndCwd.slice(0, statusSeparatorIndex),
+    cwd: statusAndCwd.slice(statusSeparatorIndex + 1),
+  };
+}
+
+function getShellInitScript(shellName: string, nonce: string): string {
   if (shellName.includes("fish")) {
     return `
 function __pi_eval
   set -l __pi_id $argv[1]
-  set -l __pi_file $argv[2]
-  echo "${COMMAND_START_SENTINEL}:$__pi_id:$PWD"
-  source $__pi_file
+  set -l __pi_source_file $argv[2]
+  echo "${COMMAND_START_SENTINEL}:${nonce}:$__pi_id:$PWD"
+  source $__pi_source_file
   set -l __pi_status $status
-  rm -f $__pi_file
-  echo "${COMMAND_DONE_SENTINEL}:$__pi_id:$__pi_status:$PWD"
+  echo ""
+  echo "${COMMAND_DONE_SENTINEL}:${nonce}:$__pi_id:$__pi_status:$PWD"
 end
-echo "${READY_SENTINEL}:$PWD"
+echo "${READY_SENTINEL}:${nonce}:$PWD"
 `;
   }
 
@@ -60,28 +95,43 @@ echo "${READY_SENTINEL}:$PWD"
     return `
 __pi_eval() {
   local __pi_id="$1"
-  local __pi_file="$2"
-  printf '%s:%s:%s\n' '${COMMAND_START_SENTINEL}' "$__pi_id" "$PWD"
-  source "$__pi_file"
+  local __pi_source_file="$2"
+  readonly __pi_source_file
+  printf '%s:%s:%s:%s\n' '${COMMAND_START_SENTINEL}' '${nonce}' "$__pi_id" "$PWD"
+  source "$__pi_source_file"
   local __pi_status=$?
-  rm -f "$__pi_file"
-  printf '%s:%s:%s:%s\n' '${COMMAND_DONE_SENTINEL}' "$__pi_id" "$__pi_status" "$PWD"
+  printf '\n%s:%s:%s:%s:%s\n' '${COMMAND_DONE_SENTINEL}' '${nonce}' "$__pi_id" "$__pi_status" "$PWD"
 }
-printf '%s:%s\n' '${READY_SENTINEL}' "$PWD"
+printf '%s:%s:%s\n' '${READY_SENTINEL}' '${nonce}' "$PWD"
+`;
+  }
+
+  if (!shellName.includes("zsh")) {
+    return `
+__pi_eval() {
+  __pi_id="$1"
+  __pi_source_file="$2"
+  readonly __pi_source_file
+  printf '%s:%s:%s:%s\n' '${COMMAND_START_SENTINEL}' '${nonce}' "$__pi_id" "$PWD"
+  . "$__pi_source_file"
+  __pi_status=$?
+  printf '\n%s:%s:%s:%s:%s\n' '${COMMAND_DONE_SENTINEL}' '${nonce}' "$__pi_id" "$__pi_status" "$PWD"
+}
+printf '%s:%s:%s\n' '${READY_SENTINEL}' '${nonce}' "$PWD"
 `;
   }
 
   return `
 function __pi_eval() {
   local __pi_id="$1"
-  local __pi_file="$2"
-  print -r -- "${COMMAND_START_SENTINEL}:$__pi_id:$PWD"
-  builtin source "$__pi_file"
+  local -r __pi_source_file="$2"
+  print -r -- "${COMMAND_START_SENTINEL}:${nonce}:$__pi_id:$PWD"
+  builtin source "$__pi_source_file"
   local __pi_status=$?
-  rm -f "$__pi_file"
-  print -r -- "${COMMAND_DONE_SENTINEL}:$__pi_id:$__pi_status:$PWD"
+  print -r -- ""
+  print -r -- "${COMMAND_DONE_SENTINEL}:${nonce}:$__pi_id:$__pi_status:$PWD"
 }
-print -r -- "${READY_SENTINEL}:$PWD"
+print -r -- "${READY_SENTINEL}:${nonce}:$PWD"
 `;
 }
 
@@ -92,9 +142,12 @@ export class ManagedShellSession {
   private readonly onCommandSuccess: (command: string, cwd: string) => void;
   private process: ChildProcessWithoutNullStreams | null = null;
   private readonly tempDir = mkdtempSync(join(tmpdir(), "powerline-bash-mode-"));
-  private buffer = "";
+  private stdoutBuffer = "";
+  private stderrBuffer = "";
   private commandCounter = 0;
   private currentCommandId: string | null = null;
+  private currentCommandFilePath: string | null = null;
+  private readonly sentinelNonce = randomBytes(16).toString("hex");
   private readyPromise: Promise<void> | null = null;
   private readyResolve: (() => void) | null = null;
   private readyReject: ((error: Error) => void) | null = null;
@@ -145,8 +198,8 @@ export class ManagedShellSession {
 
     this.process.stdout.setEncoding("utf8");
     this.process.stderr.setEncoding("utf8");
-    this.process.stdout.on("data", (chunk) => this.handleChunk(String(chunk)));
-    this.process.stderr.on("data", (chunk) => this.handleChunk(String(chunk)));
+    this.process.stdout.on("data", (chunk) => this.handleStdoutChunk(String(chunk)));
+    this.process.stderr.on("data", (chunk) => this.handleStderrChunk(String(chunk)));
     this.process.on("error", (error) => {
       if (!this.state.ready) {
         this.readyReject?.(error instanceof Error ? error : new Error(String(error)));
@@ -159,22 +212,26 @@ export class ManagedShellSession {
       }
 
       if (this.currentCommandId) {
-        this.transcript.finishCommand(this.currentCommandId, exitCode);
         this.state.lastExitCode = exitCode;
+        this.flushStderrBuffer();
+        this.transcript.finishCommand(this.currentCommandId, exitCode);
         this.currentCommandId = null;
+        this.cleanupCommandFile();
       }
 
       this.process = null;
-      this.buffer = "";
+      this.stdoutBuffer = "";
+      this.stderrBuffer = "";
       this.readyPromise = null;
       this.readyResolve = null;
       this.readyReject = null;
       this.state.ready = false;
       this.state.running = false;
+      this.cleanupTempDir();
       this.onStateChange();
     });
 
-    this.sendRaw(getShellInitScript(this.state.shellName) + "\n");
+    this.sendRaw(getShellInitScript(this.state.shellName, this.sentinelNonce) + "\n");
     return this.readyPromise;
   }
 
@@ -190,9 +247,12 @@ export class ManagedShellSession {
     const id = `cmd-${++this.commandCounter}`;
     const extension = this.state.shellName.includes("fish") ? "fish" : "sh";
     const filePath = join(this.tempDir, `${id}.${extension}`);
+    mkdirSync(this.tempDir, { recursive: true });
     writeFileSync(filePath, command.endsWith("\n") ? command : `${command}\n`, "utf8");
+    chmodSync(filePath, 0o600);
 
     this.currentCommandId = id;
+    this.currentCommandFilePath = filePath;
     this.state.running = true;
     this.transcript.startCommand(id, command, this.state.cwd);
     this.onStateChange();
@@ -214,7 +274,10 @@ export class ManagedShellSession {
     this.readyPromise = null;
     this.readyResolve = null;
     this.readyReject = null;
-    if (!this.process) return;
+    if (!this.process) {
+      this.cleanupTempDir();
+      return;
+    }
     try {
       process.kill(-this.process.pid!, "SIGKILL");
     } catch {
@@ -222,6 +285,32 @@ export class ManagedShellSession {
       this.process.kill("SIGKILL");
     }
     this.process = null;
+    this.cleanupTempDir();
+  }
+
+  private cleanupTempDir(): void {
+    try {
+      rmSync(this.tempDir, { recursive: true, force: true });
+    } catch {
+      // Temp scripts are best-effort cleanup; command execution should not throw here.
+    }
+  }
+
+  private cleanupCommandFile(): void {
+    const filePath = this.currentCommandFilePath;
+    this.currentCommandFilePath = null;
+    if (!filePath) return;
+    try {
+      rmSync(filePath, { force: true });
+    } catch {
+      // Command scripts are best-effort cleanup; temp dir cleanup is the fallback.
+    }
+  }
+
+  private flushStderrBuffer(): void {
+    if (!this.currentCommandId || !this.stderrBuffer) return;
+    this.transcript.appendOutput(this.currentCommandId, this.stderrBuffer.trimEnd());
+    this.stderrBuffer = "";
   }
 
   private sendRaw(text: string): void {
@@ -229,20 +318,36 @@ export class ManagedShellSession {
     this.process.stdin.write(text);
   }
 
-  private handleChunk(chunk: string): void {
+  private handleStderrChunk(chunk: string): void {
+    const sanitized = stripAnsi(chunk).replace(/\r/g, "");
+    if (!sanitized || !this.currentCommandId) return;
+
+    this.stderrBuffer += sanitized;
+    const parts = this.stderrBuffer.split("\n");
+    this.stderrBuffer = parts.pop() ?? "";
+
+    for (const rawLine of parts) {
+      const line = rawLine.trimEnd();
+      this.transcript.appendOutput(this.currentCommandId, line);
+      this.onStateChange();
+    }
+  }
+
+  private handleStdoutChunk(chunk: string): void {
     const sanitized = stripAnsi(chunk).replace(/\r/g, "");
     if (!sanitized) return;
 
-    this.buffer += sanitized;
-    const parts = this.buffer.split("\n");
-    this.buffer = parts.pop() ?? "";
+    this.stdoutBuffer += sanitized;
+    const parts = this.stdoutBuffer.split("\n");
+    this.stdoutBuffer = parts.pop() ?? "";
 
     for (const rawLine of parts) {
       const line = rawLine.trimEnd();
       if (!this.state.ready) {
-        if (line.startsWith(`${READY_SENTINEL}:`)) {
+        const ready = parseReadySentinel(line, this.sentinelNonce);
+        if (ready) {
           this.state.ready = true;
-          this.state.cwd = line.slice(READY_SENTINEL.length + 1) || this.state.cwd;
+          this.state.cwd = ready.cwd || this.state.cwd;
           this.readyResolve?.();
           this.readyResolve = null;
           this.readyReject = null;
@@ -252,30 +357,33 @@ export class ManagedShellSession {
       }
 
       if (line.startsWith(`${COMMAND_START_SENTINEL}:`)) {
-        const [, id, cwd] = line.split(":");
-        if (cwd) this.state.cwd = cwd;
-        this.currentCommandId = id ?? this.currentCommandId;
-        this.onStateChange();
-        continue;
+        const parsed = parseCommandStartSentinel(line, this.sentinelNonce);
+        if (parsed && parsed.id === this.currentCommandId) {
+          if (parsed.cwd) this.state.cwd = parsed.cwd;
+          this.onStateChange();
+          continue;
+        }
       }
 
       if (line.startsWith(`${COMMAND_DONE_SENTINEL}:`)) {
-        const [, id, exitCodeText, cwd] = line.split(":");
-        const exitCode = Number.parseInt(exitCodeText ?? "1", 10);
-        this.state.running = false;
-        this.state.lastExitCode = Number.isFinite(exitCode) ? exitCode : 1;
-        if (cwd) this.state.cwd = cwd;
-        if (id) {
-          this.transcript.finishCommand(id, this.state.lastExitCode);
+        const parsed = parseCommandDoneSentinel(line, this.sentinelNonce);
+        if (parsed && parsed.id === this.currentCommandId) {
+          const exitCode = Number.parseInt(parsed.exitCodeText, 10);
+          this.state.running = false;
+          this.state.lastExitCode = Number.isFinite(exitCode) ? exitCode : 1;
+          if (parsed.cwd) this.state.cwd = parsed.cwd;
+          this.flushStderrBuffer();
+          this.transcript.finishCommand(parsed.id, this.state.lastExitCode);
           const snapshot = this.transcript.getSnapshot();
-          const command = snapshot.commands.find((entry) => entry.id === id);
+          const command = snapshot.commands.find((entry) => entry.id === parsed.id);
           if (command && this.state.lastExitCode === 0) {
             this.onCommandSuccess(command.command, this.state.cwd);
           }
+          this.currentCommandId = null;
+          this.cleanupCommandFile();
+          this.onStateChange();
+          continue;
         }
-        this.currentCommandId = null;
-        this.onStateChange();
-        continue;
       }
 
       if (!this.currentCommandId) continue;

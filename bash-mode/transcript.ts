@@ -17,6 +17,28 @@ function compactLines(lines: string[]): string[] {
   return normalized;
 }
 
+function trimStartToMaxBytes(value: string, maxBytes: number): string {
+  if (maxBytes <= 0) return "";
+
+  let trimmed = value;
+  while (byteLength(trimmed) > maxBytes && trimmed.length > 0) {
+    const excessBytes = byteLength(trimmed) - maxBytes;
+    trimmed = trimmed.slice(Math.min(trimmed.length, Math.max(1, excessBytes)));
+  }
+
+  // Slicing by code-unit count can cut through a UTF-16 surrogate pair (astral
+  // chars like emoji), leaving a lone low surrogate that renders as �. Drop a
+  // leading orphaned low surrogate so the trimmed text stays valid UTF-16.
+  if (trimmed.length > 0) {
+    const firstCode = trimmed.charCodeAt(0);
+    if (firstCode >= 0xdc00 && firstCode <= 0xdfff) {
+      trimmed = trimmed.slice(1);
+    }
+  }
+
+  return trimmed;
+}
+
 export class BashTranscriptStore {
   private readonly settings: Pick<BashModeSettings, "transcriptMaxLines" | "transcriptMaxBytes">;
   private commands: BashCommandRecord[] = [];
@@ -103,6 +125,33 @@ export class BashTranscriptStore {
       this.totalBytes = Math.max(0, this.totalBytes - removed.outputBytes);
       this.truncatedCommands += 1;
       removed.truncated = true;
+    }
+
+    const active = this.commands[0];
+    if (!active) return;
+
+    while (
+      active.output.length > 1
+      && (this.totalLines > this.settings.transcriptMaxLines || this.totalBytes > this.settings.transcriptMaxBytes)
+    ) {
+      const removedLine = active.output.shift();
+      if (removedLine === undefined) break;
+      const removedBytes = byteLength(removedLine) + 1;
+      active.outputBytes = Math.max(0, active.outputBytes - removedBytes);
+      this.totalLines = Math.max(0, this.totalLines - 1);
+      this.totalBytes = Math.max(0, this.totalBytes - removedBytes);
+      active.truncated = true;
+    }
+
+    if (active.output.length === 1 && this.totalBytes > this.settings.transcriptMaxBytes) {
+      const originalLine = active.output[0] ?? "";
+      const originalBytes = byteLength(originalLine) + 1;
+      const trimmedLine = trimStartToMaxBytes(originalLine, Math.max(0, this.settings.transcriptMaxBytes - 1));
+      const trimmedBytes = byteLength(trimmedLine) + 1;
+      active.output[0] = trimmedLine;
+      active.outputBytes = Math.max(0, active.outputBytes - originalBytes + trimmedBytes);
+      this.totalBytes = Math.max(0, this.totalBytes - originalBytes + trimmedBytes);
+      active.truncated = true;
     }
   }
 }
