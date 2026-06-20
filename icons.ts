@@ -1,4 +1,5 @@
-import { loadThemeConfig } from "./theme.ts";
+import { loadThemeConfig, type PowerlineThemeConfig } from "./theme.ts";
+import { stripTerminalControlSequences } from "./sanitize.ts";
 
 export interface IconSet {
   pi: string;
@@ -106,7 +107,10 @@ function sanitizeUserIconOverrides(value: unknown): PartialIconSet {
   for (const key of validKeys) {
     const icon = value[key];
     if (typeof icon === "string") {
-      sanitized[key] = icon;
+      // theme.json is local but still untrusted input: strip terminal control
+      // sequences and line breaks so an icon override cannot inject escape codes
+      // or extra rows into the rendered bar.
+      sanitized[key] = stripTerminalControlSequences(icon).replace(/[\r\n\t]/g, "");
     }
   }
 
@@ -187,12 +191,30 @@ export function hasNerdFonts(): boolean {
   return true;
 }
 
+let cachedIcons: IconSet | null = null;
+let cachedIconsSource: PowerlineThemeConfig | null = null;
+let cachedIconsNerd: boolean | null = null;
+
 export function getIcons(): IconSet {
-  const baseIcons = hasNerdFonts() ? NERD_ICONS : ASCII_ICONS;
-  return {
+  const nerd = hasNerdFonts();
+  const themeConfig = loadThemeConfig();
+  // loadThemeConfig() returns a stable object reference while theme.json is
+  // unchanged, so memoize the assembled icon set (object spread + a 20-key
+  // sanitize pass) and rebuild only when the font preference flips or the theme
+  // file changes. getIcons() is called once per segment on every layout
+  // recompute, where it previously re-allocated and re-sanitized every time.
+  if (cachedIcons && cachedIconsNerd === nerd && cachedIconsSource === themeConfig) {
+    return cachedIcons;
+  }
+
+  const baseIcons = nerd ? NERD_ICONS : ASCII_ICONS;
+  cachedIcons = {
     ...baseIcons,
-    ...sanitizeUserIconOverrides(loadThemeConfig().icons),
+    ...sanitizeUserIconOverrides(themeConfig.icons),
   };
+  cachedIconsSource = themeConfig;
+  cachedIconsNerd = nerd;
+  return cachedIcons;
 }
 
 export function getSeparatorChars(): SeparatorChars {

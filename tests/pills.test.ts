@@ -132,7 +132,7 @@ test("parsePowerlineConfig reads pillForeground + pillTextColors", () => {
   );
   assert.equal(cfg.pillForeground, "#1a1b26");
   assert.deepEqual(cfg.pillTextColors, { git: "#abcdef" });
-  assert.equal(parsePowerlineConfig({ pillForeground: "text" }, PRESETS).pillForeground, "text");
+  assert.equal(parsePowerlineConfig({ pillForeground: "text" }, PRESETS).pillForeground, "");
   assert.equal(parsePowerlineConfig({ pillForeground: "bad color" }, PRESETS).pillForeground, "");
 });
 
@@ -143,6 +143,15 @@ test("parsePowerlineConfig reads pillColors + pillGroups", () => {
   );
   assert.deepEqual(cfg.pillColors, { path: "#123456" }, "invalid hex dropped");
   assert.deepEqual(cfg.pillGroups, [["path", "git"]], "non-array/empty groups dropped");
+});
+
+test("theme color names are not emitted as invalid pill foreground ANSI", () => {
+  const cfg = parsePowerlineConfig({ pillForeground: "text" }, PRESETS);
+  const units = buildPillUnits([{ id: "path", content: "~/dev" }], [], {}, "#000000", {}, cfg.pillForeground);
+  const pill = wrapInPillGroup(units[0]);
+
+  assert.ok(!pill.includes("NaN"), "invalid RGB components must not be emitted");
+  assert.ok(!pill.includes("38;2;NaN;NaN;NaNm"), "invalid foreground ANSI must not be emitted");
 });
 
 test("wrapInPillGroup adds bold SGR when bold=true", () => {

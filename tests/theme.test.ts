@@ -53,3 +53,54 @@ test("loadThemeConfig ignores symlinked theme.json", async () => {
     rmSync(tempDir, { recursive: true, force: true });
   }
 });
+
+test("theme color overrides strip terminal control sequences", async () => {
+  const themePath = join(dirname(fileURLToPath(new URL("../theme.ts", import.meta.url))), "theme.json");
+  const backupPath = `${themePath}.bak-${Date.now()}`;
+  const hasExisting = existsSync(themePath);
+  if (hasExisting) writeFileSync(backupPath, readFileSync(themePath));
+
+  try {
+    // A hex color smuggling a CSI color sequence and an OSC payload.
+    writeFileSync(
+      themePath,
+      JSON.stringify({ colors: { path: "#123456\u001b[31m\u001b]0;pwn\u0007" } }) + "\n",
+    );
+    const { resolveColor } = await import(themeModuleUrl());
+    const resolved = resolveColor("path");
+    assert.equal(resolved, "#123456");
+    assert.doesNotMatch(resolved, /\u001b/);
+  } finally {
+    if (existsSync(themePath)) unlinkSync(themePath);
+    if (hasExisting) {
+      writeFileSync(themePath, readFileSync(backupPath));
+      unlinkSync(backupPath);
+    }
+  }
+});
+
+test("icon overrides strip terminal control sequences and line breaks", async () => {
+  const themePath = join(dirname(fileURLToPath(new URL("../theme.ts", import.meta.url))), "theme.json");
+  const backupPath = `${themePath}.bak-${Date.now()}`;
+  const hasExisting = existsSync(themePath);
+  if (hasExisting) writeFileSync(backupPath, readFileSync(themePath));
+
+  try {
+    // A branch icon override wrapping the glyph in a color sequence, an OSC
+    // payload, and a stray newline.
+    writeFileSync(
+      themePath,
+      JSON.stringify({ icons: { branch: "\u001b[31m\uE0A0\u001b]0;pwn\u0007\n" } }) + "\n",
+    );
+    const { getIcons } = await import(`../icons.ts?test=${Date.now()}-${Math.random()}`);
+    const icons = getIcons();
+    assert.equal(icons.branch, "\uE0A0");
+    assert.doesNotMatch(icons.branch, /[\u001b\n]/);
+  } finally {
+    if (existsSync(themePath)) unlinkSync(themePath);
+    if (hasExisting) {
+      writeFileSync(themePath, readFileSync(backupPath));
+      unlinkSync(backupPath);
+    }
+  }
+});

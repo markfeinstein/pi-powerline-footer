@@ -8,10 +8,11 @@
  */
 
 import type { Theme, ThemeColor } from "@earendil-works/pi-coding-agent";
-import { existsSync, lstatSync, readFileSync } from "node:fs";
+import { lstatSync, readFileSync, type Stats } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ColorScheme, ColorValue, SemanticColor, ThemeLike } from "./types.ts";
+import { stripTerminalControlSequences } from "./sanitize.ts";
 
 export interface PowerlineThemeConfig {
   colors?: unknown;
@@ -48,7 +49,6 @@ const RAINBOW_COLORS = [
 let userThemeCache: ColorScheme | null = null;
 let userThemeCacheSource: PowerlineThemeConfig | null = null;
 let themeConfigCache: { fingerprint: string; value: PowerlineThemeConfig } | null = null;
-const CACHE_TTL = 5000; // 5 seconds
 const MAX_THEME_FILE_BYTES = 64 * 1024;
 const warnedInvalidThemeColors = new Set<string>();
 
@@ -70,7 +70,10 @@ function sanitizeUserThemeOverrides(value: unknown): ColorScheme {
       continue;
     }
 
-    const color = rawColor.trim();
+    // Strip terminal control sequences before trimming: a color value is later
+    // emitted near ANSI codes (or passed to the host theme), so an override must
+    // never be able to smuggle escape codes into the bar.
+    const color = stripTerminalControlSequences(rawColor).replace(/[\r\n\t]/g, "").trim();
     if (!color) {
       continue;
     }
@@ -84,9 +87,15 @@ function sanitizeUserThemeOverrides(value: unknown): ColorScheme {
 /**
  * Get the path to the theme.json file
  */
+let cachedThemePath: string | null = null;
 function getThemePath(): string {
-  const extDir = dirname(fileURLToPath(import.meta.url));
-  return join(extDir, "theme.json");
+  // import.meta.url is constant for the process lifetime, so resolve the
+  // theme.json path once. loadThemeConfig() is on the render hot path and was
+  // recomputing fileURLToPath + dirname + join on every call.
+  if (cachedThemePath === null) {
+    cachedThemePath = join(dirname(fileURLToPath(import.meta.url)), "theme.json");
+  }
+  return cachedThemePath;
 }
 
 /**
@@ -94,9 +103,23 @@ function getThemePath(): string {
  */
 export function loadThemeConfig(): PowerlineThemeConfig {
   const themePath = getThemePath();
+
+  // A single lstat replaces the previous existsSync + lstatSync pair (two
+  // filesystem syscalls collapse to one). loadThemeConfig runs many times per
+  // layout recompute (once per colored segment + once per getIcons), so the
+  // halved syscall count adds up. `throwIfNoEntry: false` returns undefined for a
+  // missing file instead of throwing (V8 exception handling is far slower than a
+  // plain return on the common no-theme.json path). lstat does not follow
+  // symlinks, so a symlinked theme.json still fails the isFile() guard below.
+  let stats: Stats | undefined;
   try {
-    if (existsSync(themePath)) {
-      const stats = lstatSync(themePath);
+    stats = lstatSync(themePath, { throwIfNoEntry: false });
+  } catch {
+    stats = undefined;
+  }
+
+  if (stats) {
+    try {
       if (!stats.isFile() || stats.size > MAX_THEME_FILE_BYTES) {
         console.debug(`[powerline-theme] Ignoring unsafe theme path at ${themePath}`);
         themeConfigCache = { fingerprint: `${themePath}:unsafe`, value: {} };
@@ -113,11 +136,11 @@ export function loadThemeConfig(): PowerlineThemeConfig {
       const value = isRecord(parsed) ? parsed : {};
       themeConfigCache = { fingerprint, value };
       return value;
+    } catch (error) {
+      // Theme overrides are optional. If the file is unreadable or malformed,
+      // keep rendering with built-in defaults instead of breaking the footer.
+      console.debug(`[powerline-theme] Failed to load ${themePath}:`, error);
     }
-  } catch (error) {
-    // Theme overrides are optional. If the file is unreadable or malformed,
-    // keep rendering with built-in defaults instead of breaking the footer.
-    console.debug(`[powerline-theme] Failed to load ${themePath}:`, error);
   }
 
   const fingerprint = `${themePath}:missing`;

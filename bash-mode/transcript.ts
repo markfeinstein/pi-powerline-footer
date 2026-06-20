@@ -1,4 +1,12 @@
+import { stripTerminalControlSequences } from "../sanitize.ts";
 import type { BashCommandRecord, BashModeSettings, BashTranscriptSnapshot } from "./types.ts";
+
+export const BASH_TRANSCRIPT_MAX_LINES = 10_000;
+export const BASH_TRANSCRIPT_MAX_BYTES = 2 * 1024 * 1024;
+
+function capTranscriptLimit(value: number, max: number): number {
+  return Number.isFinite(value) ? Math.min(Math.floor(value), max) : max;
+}
 
 function byteLength(value: string): number {
   return Buffer.byteLength(value, "utf8");
@@ -7,7 +15,7 @@ function byteLength(value: string): number {
 function compactLines(lines: string[]): string[] {
   const normalized: string[] = [];
   for (const line of lines) {
-    const sanitized = line.replace(/\r/g, "");
+    const sanitized = stripTerminalControlSequences(line).replace(/\r/g, "");
     if (sanitized.length === 0) {
       normalized.push("");
       continue;
@@ -19,24 +27,24 @@ function compactLines(lines: string[]): string[] {
 
 function trimStartToMaxBytes(value: string, maxBytes: number): string {
   if (maxBytes <= 0) return "";
+  if (byteLength(value) <= maxBytes) return value;
 
-  let trimmed = value;
-  while (byteLength(trimmed) > maxBytes && trimmed.length > 0) {
-    const excessBytes = byteLength(trimmed) - maxBytes;
-    trimmed = trimmed.slice(Math.min(trimmed.length, Math.max(1, excessBytes)));
+  // Keep the longest suffix that fits within maxBytes. Count UTF-8 bytes per code
+  // point and only break on code-point boundaries so astral chars (emoji) are
+  // never split into a lone surrogate (which would render as �). Walking the byte
+  // budget directly avoids the prior bug where a byte count was used as a UTF-16
+  // code-unit slice offset, which over-trimmed multibyte text to an empty string.
+  const chars = Array.from(value);
+  let bytes = 0;
+  let startChar = chars.length;
+  for (let i = chars.length - 1; i >= 0; i--) {
+    const charBytes = byteLength(chars[i]!);
+    if (bytes + charBytes > maxBytes) break;
+    bytes += charBytes;
+    startChar = i;
   }
 
-  // Slicing by code-unit count can cut through a UTF-16 surrogate pair (astral
-  // chars like emoji), leaving a lone low surrogate that renders as �. Drop a
-  // leading orphaned low surrogate so the trimmed text stays valid UTF-16.
-  if (trimmed.length > 0) {
-    const firstCode = trimmed.charCodeAt(0);
-    if (firstCode >= 0xdc00 && firstCode <= 0xdfff) {
-      trimmed = trimmed.slice(1);
-    }
-  }
-
-  return trimmed;
+  return chars.slice(startChar).join("");
 }
 
 export class BashTranscriptStore {
@@ -48,14 +56,17 @@ export class BashTranscriptStore {
   private truncatedCommands = 0;
 
   constructor(settings: Pick<BashModeSettings, "transcriptMaxLines" | "transcriptMaxBytes">) {
-    this.settings = settings;
+    this.settings = {
+      transcriptMaxLines: capTranscriptLimit(settings.transcriptMaxLines, BASH_TRANSCRIPT_MAX_LINES),
+      transcriptMaxBytes: capTranscriptLimit(settings.transcriptMaxBytes, BASH_TRANSCRIPT_MAX_BYTES),
+    };
   }
 
   startCommand(id: string, command: string, cwdAtStart: string): BashCommandRecord {
     const entry: BashCommandRecord = {
       id,
-      command,
-      cwdAtStart,
+      command: stripTerminalControlSequences(command),
+      cwdAtStart: stripTerminalControlSequences(cwdAtStart),
       startedAt: Date.now(),
       output: [],
       outputBytes: 0,

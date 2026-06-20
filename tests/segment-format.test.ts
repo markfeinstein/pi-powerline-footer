@@ -49,7 +49,9 @@ const TOKEN_CASES: Array<[number, string]> = [
   [999, "999"],
   [1500, "1.5k"],
   [12000, "12k"],
+  [999999, "1.0M"],
   [1_500_000, "1.5M"],
+  [9_999_999, "10M"],
   [12_000_000, "12M"],
 ];
 
@@ -87,6 +89,41 @@ test("cost segment renders subscription without throwing", () => {
   assert.ok(rendered.content.length > 0);
 });
 
+test("path segment strips terminal controls from cwd text", () => {
+  const rendered = renderSegment(
+    "path",
+    ctx({
+      cwd: "/tmp/repo\x1b]52;c;secret\x07\x1b[31mred",
+      options: { path: { mode: "full" } },
+      colors: { path: "#101010" } as ColorScheme,
+    }),
+  );
+
+  assert.equal(rendered.visible, true);
+  assert.doesNotMatch(rendered.content, /\x1b\]/);
+  assert.doesNotMatch(rendered.content, /\x1b\[31m/);
+  assert.doesNotMatch(rendered.content, /secret/);
+  assert.match(rendered.content, /red/);
+});
+
+test("shell mode segment strips terminal controls from shell fields", () => {
+  const rendered = renderSegment(
+    "shell_mode",
+    ctx({
+      shellModeActive: true,
+      shellName: "bash\x1b]0;secret\x07",
+      shellCwd: "/tmp/project\x1b[31mred",
+      colors: { shellMode: "#101010" } as ColorScheme,
+    }),
+  );
+
+  assert.equal(rendered.visible, true);
+  assert.doesNotMatch(rendered.content, /\x1b\]/);
+  assert.doesNotMatch(rendered.content, /\x1b\[31m/);
+  assert.doesNotMatch(rendered.content, /secret/);
+  assert.match(rendered.content, /projectred/);
+});
+
 // ── context_pct threshold colors ─────────────────────────────────────────────
 const CONTEXT_COLORS: ColorScheme = {
   context: "#101010",
@@ -121,6 +158,14 @@ test("context_pct is hidden when custom compaction is enabled", () => {
   const rendered = renderSegment(
     "context_pct",
     ctx({ contextPercent: 42, contextWindow: 8000, customCompactionEnabled: true }),
+  );
+  assert.equal(rendered.visible, false);
+});
+
+test("context_pct is hidden when context window is unavailable", () => {
+  const rendered = renderSegment(
+    "context_pct",
+    ctx({ contextPercent: 0, contextWindow: 0 }),
   );
   assert.equal(rendered.visible, false);
 });

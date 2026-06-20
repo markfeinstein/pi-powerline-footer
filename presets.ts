@@ -42,7 +42,7 @@ export const PRESETS: Record<StatusLinePreset, PresetDef> = {
     colors: MINIMAL_COLORS,
     segmentOptions: {
       path: { mode: "basename" },
-      git: { showBranch: true, showStaged: false, showUnstaged: false, showUntracked: false },
+      git: { showBranch: true, showStaged: false, showUnstaged: false, showUntracked: false, polling: "branch" },
     },
   },
 

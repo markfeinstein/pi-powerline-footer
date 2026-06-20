@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Fixed
+- **Working vibe startup race** — Generated working-vibe text is now retained when it resolves before `agent_start`, so the pre-start placeholder is replaced once the loader appears.
+- **Bash transcript limits** — User-configured bash transcript retention is now capped to avoid unbounded in-memory output retention.
+- **Bash tilde completions without HOME** — `~/` ghost path suggestions now use the same `USERPROFILE`/OS-home fallback as other home-directory lookups when `HOME` is unset.
+- **Bash history secret retention** — Obvious credential-bearing shell commands are no longer persisted in project bash history or surfaced from shell-history suggestions.
+
 ## [0.6.1] - 2026-06-08
 
 ### Fixed

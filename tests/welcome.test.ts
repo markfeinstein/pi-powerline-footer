@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { discoverLoadedCounts, getRecentSessions } from "../welcome.ts";
+import { WelcomeComponent, WelcomeHeader, discoverLoadedCounts, getRecentSessions } from "../welcome.ts";
 
 function withIsolatedProject<T>(fn: (root: string, home: string) => T): T {
   const root = mkdtempSync(join(tmpdir(), "powerline-welcome-"));
@@ -70,6 +70,75 @@ test("welcome discovery ignores symlinked context, extension, skill, and templat
   });
 });
 
+test("welcome rendering strips terminal controls from dynamic text", () => {
+  const unsafe = "safe\x1b]52;c;secret\x07\x1b[2Jtext\nnext";
+  const session = { name: unsafe, timeAgo: "just\x1b[31m now" };
+
+  for (const component of [
+    new WelcomeComponent(unsafe, unsafe, [session]),
+    new WelcomeHeader(unsafe, unsafe, [session]),
+  ]) {
+    const rendered = component.render(100).join("\n");
+    assert.ok(!rendered.includes("\x1b]52"), "OSC controls must be stripped");
+    assert.ok(!rendered.includes("\x1b[2J"), "CSI controls from data must be stripped");
+    assert.ok(!rendered.includes("secret"), "OSC payload must be stripped");
+    assert.ok(rendered.includes("safetext next"), "sanitized display text remains visible");
+  }
+});
+
+test("welcome discovery ignores symlinked root scan directories", () => {
+  withIsolatedProject((root, home) => {
+    const outsideExtensions = join(root, "outside-extensions");
+    const outsideSkills = join(root, "outside-skills");
+    const outsideCommands = join(root, "outside-commands");
+    const outsideSessions = join(root, "outside-sessions");
+    mkdirSync(outsideExtensions, { recursive: true });
+    mkdirSync(outsideSkills, { recursive: true });
+    mkdirSync(outsideCommands, { recursive: true });
+    mkdirSync(join(outsideSessions, "--secret-project--"), { recursive: true });
+    writeFileSync(join(outsideExtensions, "leaked.js"), "export default {};\n");
+    mkdirSync(join(outsideSkills, "leaked"), { recursive: true });
+    writeFileSync(join(outsideSkills, "leaked", "SKILL.md"), "# leaked\n");
+    writeFileSync(join(outsideCommands, "leaked.md"), "prompt\n");
+    writeFileSync(join(outsideSessions, "--secret-project--", "session.jsonl"), "{}\n");
+
+    const agentDir = join(home, ".pi", "agent");
+    mkdirSync(agentDir, { recursive: true });
+    symlinkSync(outsideExtensions, join(agentDir, "extensions"), "dir");
+    symlinkSync(outsideSkills, join(agentDir, "skills"), "dir");
+    symlinkSync(outsideCommands, join(agentDir, "commands"), "dir");
+    symlinkSync(outsideSessions, join(agentDir, "sessions"), "dir");
+
+    assert.deepEqual(discoverLoadedCounts(), {
+      contextFiles: 0,
+      extensions: 0,
+      skills: 0,
+      promptTemplates: 0,
+    });
+    assert.deepEqual(getRecentSessions(), []);
+  });
+});
+
+test("welcome discovery bounds extension and skill directory scans", () => {
+  withIsolatedProject((_root, home) => {
+    const extensionsDir = join(home, ".pi", "agent", "extensions");
+    const skillsDir = join(home, ".pi", "agent", "skills");
+    mkdirSync(extensionsDir, { recursive: true });
+    mkdirSync(skillsDir, { recursive: true });
+
+    for (let i = 0; i < 2005; i++) {
+      writeFileSync(join(extensionsDir, `ext-${i}.js`), "export default {};\n");
+      const skillDir = join(skillsDir, `skill-${i}`);
+      mkdirSync(skillDir, { recursive: true });
+      writeFileSync(join(skillDir, "SKILL.md"), "# skill\n");
+    }
+
+    const counts = discoverLoadedCounts();
+    assert.equal(counts.extensions, 2000);
+    assert.equal(counts.skills, 2000);
+  });
+});
+
 test("welcome discovery ignores symlinked settings files", () => {
   withIsolatedProject((root) => {
     const project = process.cwd();
@@ -85,6 +154,37 @@ test("welcome discovery ignores symlinked settings files", () => {
       skills: 0,
       promptTemplates: 0,
     });
+  });
+});
+
+test("welcome discovery bounds deeply nested prompt templates", () => {
+  withIsolatedProject((_root, home) => {
+    const commandsDir = join(home, ".pi", "agent", "commands");
+    mkdirSync(commandsDir, { recursive: true });
+    writeFileSync(join(commandsDir, "visible.md"), "prompt\n");
+
+    let deepDir = commandsDir;
+    for (let i = 0; i < 12; i++) {
+      deepDir = join(deepDir, `d${i}`);
+      mkdirSync(deepDir, { recursive: true });
+    }
+    writeFileSync(join(deepDir, "too-deep.md"), "prompt\n");
+
+    assert.equal(discoverLoadedCounts().promptTemplates, 1);
+  });
+});
+
+test("recent sessions bound deeply nested session scans", () => {
+  withIsolatedProject((_root, home) => {
+    let deepDir = join(home, ".pi", "agent", "sessions");
+    mkdirSync(deepDir, { recursive: true });
+    for (let i = 0; i < 12; i++) {
+      deepDir = join(deepDir, `d${i}`);
+      mkdirSync(deepDir, { recursive: true });
+    }
+    writeFileSync(join(deepDir, "session.jsonl"), "{}\n");
+
+    assert.deepEqual(getRecentSessions(), []);
   });
 });
 

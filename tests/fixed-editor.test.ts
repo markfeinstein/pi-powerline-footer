@@ -196,6 +196,19 @@ test("fixed cluster paint clears bottom rows and positions hardware cursor", () 
   assert.ok(paint.endsWith("\x1b[10;3H\x1b[?25h"));
 });
 
+test("fixed cluster paint strips unsafe terminal controls while preserving SGR", () => {
+  const paint = buildFixedClusterPaint(
+    { lines: ["\x1b[31mred\x1b[0m\x1b[2J\x1b]52;c;secret\x07"], cursor: null },
+    10,
+    20,
+    true,
+  );
+
+  assert.match(paint, /\x1b\[31mred\x1b\[0m/);
+  assert.doesNotMatch(paint, /\x1b\[2J/);
+  assert.doesNotMatch(paint, /secret/);
+});
+
 test("fixed cluster paint hides hardware cursor when requested", () => {
   const paint = buildFixedClusterPaint(
     { lines: ["top", "edit"], cursor: { row: 1, col: 2 } },
@@ -267,6 +280,40 @@ test("terminal split reserves rows, hides root renderables, repaints, and cleans
   assert.ok(terminal.writes.at(-1)?.includes("\x1b[?1049l"));
   assert.ok(!terminal.writes.at(-1)?.includes("\x1b[<u"));
   assert.ok(!terminal.writes.at(-1)?.includes("\x1b[>4;0m"));
+});
+
+test("terminal split sanitizes root render lines before normal writes", () => {
+  const terminal = new FakeTerminal();
+  terminal.columns = 20;
+  const tui = {
+    terminal,
+    hardwareCursorRow: 1,
+    cursorRow: 1,
+    previousViewportTop: 0,
+    render() {
+      return ["safe\x1b]52;c;secret\x07after\x1b[2J"];
+    },
+    doRender() {
+      this.terminal.write(this.render(20).join("\n"));
+    },
+  };
+
+  const compositor = new TerminalSplitCompositor({
+    tui,
+    terminal,
+    renderCluster: () => ({ lines: ["cluster"], cursor: null }),
+  });
+
+  compositor.install();
+  tui.doRender();
+
+  const frame = terminal.writes[1] ?? "";
+  assert.match(frame, /safeafter/);
+  assert.doesNotMatch(frame, /secret/);
+  assert.doesNotMatch(frame, /\x1b\]52/);
+  assert.doesNotMatch(frame, /\x1b\[2J/);
+
+  compositor.dispose();
 });
 
 test("terminal split re-enables Kitty keyboard protocol in alternate screen", () => {
@@ -711,6 +758,45 @@ test("terminal split handles modified SGR wheel packets", () => {
   compositor.dispose();
 });
 
+test("terminal split skips unchanged fixed cluster paint during wrapped writes", () => {
+  const terminal = new FakeTerminal();
+  terminal.columns = 40;
+  terminal.setRows(8);
+  let clusterLine = "cluster-a";
+  const tui = {
+    terminal,
+    hardwareCursorRow: 2,
+    previousViewportTop: 0,
+    render() {
+      return Array.from({ length: 15 }, (_, index) => `line-${index}`);
+    },
+  };
+
+  const compositor = new TerminalSplitCompositor({
+    tui,
+    terminal,
+    renderCluster: () => ({ lines: [clusterLine, "cluster-b"], cursor: { row: 1, col: 3 } }),
+  });
+
+  compositor.install();
+  compositor.requestRepaint();
+
+  terminal.writes = [];
+  terminal.write("root update");
+  let write = terminal.writes.at(-1) ?? "";
+  assert.ok(write.includes("root update"));
+  assert.ok(write.includes("\x1b[r"));
+  assert.ok(write.includes("\x1b[8;4H"));
+  assert.doesNotMatch(write, /cluster-a/);
+
+  clusterLine = "cluster-c";
+  terminal.write("root update 2");
+  write = terminal.writes.at(-1) ?? "";
+  assert.match(write, /cluster-c/);
+
+  compositor.dispose();
+});
+
 test("terminal split guards wrapped terminal writes", () => {
   const terminal = new FakeTerminal();
   const tui = {
@@ -1094,6 +1180,49 @@ test("terminal split copies chat and fixed cluster selections", () => {
   assert.ok(terminal.writes.at(-1)?.includes("\x1b[7m  > hello world\x1b[27m"));
   assert.deepEqual(inputListener?.("\x1b[<0;9;12m"), { consume: true });
   assert.deepEqual(copied, ["india nine\njuli", "hello", "charlie three", "  > hello world"]);
+
+  compositor.dispose();
+});
+
+test("terminal split copies sanitized root and cluster selection text", () => {
+  const terminal = new FakeTerminal();
+  let inputListener: ((data: string) => { consume?: boolean; data?: string } | undefined) | null = null;
+  const copied: string[] = [];
+  const rootLines = [
+    "safe\x1b]52;c;secret\x07after\x1b[2J",
+    "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
+  ];
+  const tui = {
+    terminal,
+    addInputListener(listener: (data: string) => { consume?: boolean; data?: string } | undefined) {
+      inputListener = listener;
+      return () => {
+        inputListener = null;
+      };
+    },
+    requestRender() {},
+    render() {
+      return rootLines;
+    },
+  };
+
+  const compositor = new TerminalSplitCompositor({
+    tui,
+    terminal,
+    onCopySelection: (text) => copied.push(text),
+    renderCluster: () => ({ lines: ["clip\x1b]52;c;secret\x07text\x1b[2J"], cursor: null }),
+  });
+
+  compositor.install();
+  tui.render(40);
+
+  assert.deepEqual(inputListener?.("\x1b[<0;1;1M"), { consume: true });
+  assert.deepEqual(inputListener?.("\x1b[<0;10;1m"), { consume: true });
+  assert.deepEqual(copied, ["safeafter"]);
+
+  assert.deepEqual(inputListener?.("\x1b[<0;1;12M"), { consume: true });
+  assert.deepEqual(inputListener?.("\x1b[<0;9;12m"), { consume: true });
+  assert.deepEqual(copied, ["safeafter", "cliptext"]);
 
   compositor.dispose();
 });

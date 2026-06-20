@@ -6,7 +6,7 @@ const source = readFileSync(new URL("../index.ts", import.meta.url), "utf-8");
 
 test("stash shortcut supports macOS Option+S character input", () => {
   assert.match(source, /isKeyRelease, matchesKey, type AutocompleteProvider/);
-  assert.match(source, /pi\.registerShortcut\("alt\+s"/);
+  assert.match(source, /registerDynamicShortcut\("alt\+s", "Stash\/restore editor text", \{ kind: "stashEditor" \}\)/);
   assert.match(source, /function isStashShortcutInput\(data: string\): boolean/);
   assert.match(source, /if \(isKeyRelease\(data\)\) return false;/);
   assert.match(source, /data === "ß"/);
@@ -29,5 +29,5 @@ test("stash shortcut supports macOS Option+S character input", () => {
   assert.match(source, /104\(\?:/);
   assert.match(source, /27;7;104/);
   assert.match(source, /return \{ kind: "stashHistory" \};/);
-  assert.match(source, /void openStashHistory\(ctx\);/);
+  assert.match(source, /await openStashHistory\(ctx\);/);
 });

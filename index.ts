@@ -6,13 +6,13 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { isKeyRelease, matchesKey, type AutocompleteProvider, type SelectItem, SelectList, truncateToWidth, TUI_KEYBINDINGS, visibleWidth } from "@earendil-works/pi-tui";
-import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, lstatSync, statSync, renameSync, unlinkSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, mkdirSync, opendirSync, lstatSync, statSync, renameSync, unlinkSync } from "node:fs";
 import { join, dirname, basename } from "node:path";
 import { homedir } from "node:os";
 
 import type { ColorScheme, SegmentContext, StatusLinePreset, StatusLineSegmentId } from "./types.ts";
 import type { PowerlineConfig } from "./powerline-config.ts";
-import { BashTranscriptStore } from "./bash-mode/transcript.ts";
+import { BASH_TRANSCRIPT_MAX_BYTES, BASH_TRANSCRIPT_MAX_LINES, BashTranscriptStore } from "./bash-mode/transcript.ts";
 import {
   BashCompletionEngine,
   BashAutocompleteProvider,
@@ -28,7 +28,7 @@ import { getPreset, PRESETS } from "./presets.ts";
 import { collectHiddenExtensionStatusKeys, getNotificationExtensionStatuses, mergeSegmentOptions, mergeSegmentsWithCustomItems, nextPowerlineSettingWithOptions, nextPowerlineSettingWithPreset, parsePowerlineConfig, applyCustomLayout } from "./powerline-config.ts";
 import { getSeparator } from "./separators.ts";
 import { renderSegment } from "./segments.ts";
-import { getGitStatus, invalidateGitStatus, invalidateGitBranch } from "./git-status.ts";
+import { getGitStatus, invalidateGitStatus, invalidateGitBranch, setGitStatusUpdateListener } from "./git-status.ts";
 import { ansi, getFgAnsiCode } from "./colors.ts";
 import { wrapInPillGroup, buildPillUnits } from "./pills.ts";
 import { joinLeftRight } from "./layout.ts";
@@ -37,6 +37,7 @@ import { WelcomeComponent, WelcomeHeader, discoverLoadedCounts, getRecentSession
 import { createWelcomeDismissScheduler } from "./welcome-dismiss.ts";
 import { createRenderScheduler } from "./render-scheduler.ts";
 import { readCoreContextUsage } from "./context-usage.ts";
+import { stripTerminalControlSequences, stripUnsafeTerminalControlSequences } from "./sanitize.ts";
 import { renderFixedEditorCluster, reserveSpinnerSlot, keepSpinnerGlyph, SPINNER_SLOT_RESERVE } from "./fixed-editor/cluster.ts";
 import { emergencyTerminalModeReset, TerminalSplitCompositor } from "./fixed-editor/terminal-split.ts";
 import { fg, rainbow, getDefaultColors } from "./theme.ts";
@@ -69,12 +70,10 @@ import {
 // Configuration
 // ═══════════════════════════════════════════════════════════════════════════
 
-let config: PowerlineConfig = {
-  preset: "default",
-  customItems: [],
-  mouseScroll: true,
-  fixedEditor: true,
-};
+// Initialize from the parser so every required PowerlineConfig field has a
+// valid default before `powerlineFooter()` reassigns it during setup. Building
+// the object inline here risks silently omitting fields as the type grows.
+let config: PowerlineConfig = parsePowerlineConfig(undefined, Object.keys(PRESETS) as StatusLinePreset[]);
 
 const CUSTOM_COMPACTION_STATUS_KEY = "compact-policy";
 let customCompactionEnabled = false;
@@ -108,6 +107,7 @@ type ChatJumpShortcutAction =
   | { kind: "message"; role: ChatJumpRole; direction: ChatJumpDirection }
   | { kind: "bottom" };
 type PowerlineShortcutAction =
+  | { kind: "stashEditor" }
   | { kind: "stashHistory" }
   | { kind: "copyEditor" }
   | { kind: "cutEditor" }
@@ -115,9 +115,12 @@ type PowerlineShortcutAction =
   | { kind: "chat"; action: ChatJumpShortcutAction };
 
 const STASH_HISTORY_LIMIT = 12;
+const STASH_HISTORY_MAX_FILE_BYTES = 256 * 1024;
 const PROJECT_PROMPT_HISTORY_LIMIT = 50;
 const PROJECT_PROMPT_HISTORY_MAX_FILES = 200;
 const PROJECT_PROMPT_HISTORY_MAX_FILE_BYTES = 2 * 1024 * 1024;
+const PROJECT_PROMPT_HISTORY_MAX_TOTAL_BYTES = 16 * 1024 * 1024;
+const PROJECT_PROMPT_HISTORY_MAX_SCAN_ENTRIES = 2000;
 const STASH_PREVIEW_WIDTH = 72;
 const DEFAULT_SHORTCUTS: PowerlineShortcuts = {
   stashHistory: "ctrl+alt+h",
@@ -138,6 +141,8 @@ const DEFAULT_BASH_MODE_SETTINGS: BashModeSettings = {
   transcriptMaxLines: 2000,
   transcriptMaxBytes: 512 * 1024,
 };
+const MIN_BASH_TRANSCRIPT_LINES = 100;
+const MIN_BASH_TRANSCRIPT_BYTES = 16 * 1024;
 const CHAT_JUMP_SHORTCUTS: Array<{
   shortcutKey: ChatJumpShortcutKey;
   description: string;
@@ -384,13 +389,13 @@ function mergeSettings(base: Record<string, unknown>, override: Record<string, u
 const MAX_SETTINGS_FILE_BYTES = 256 * 1024;
 const MAX_COMPACTION_POLICY_FILE_BYTES = 64 * 1024;
 
-function readSettingsFile(settingsPath: string): Record<string, unknown> {
+function readSettingsFile(settingsPath: string, options: { refuseSymlink?: boolean } = {}): Record<string, unknown> {
   try {
     if (!existsSync(settingsPath)) {
       return {};
     }
 
-    const stats = statSync(settingsPath);
+    const stats = options.refuseSymlink ? lstatSync(settingsPath) : statSync(settingsPath);
     if (!stats.isFile() || stats.size > MAX_SETTINGS_FILE_BYTES) {
       console.debug(`[powerline-footer] Ignoring unsafe settings path at ${settingsPath}`);
       return {};
@@ -577,34 +582,54 @@ export function getPromptHistoryText(content: unknown): string {
 
 export function readRecentProjectPrompts(cwd: string, limit: number): string[] {
   const promptEntries: { text: string; timestamp: number }[] = [];
-  const sessionFiles: Array<{ filePath: string; mtimeMs: number }> = [];
+  const sessionFiles: Array<{ filePath: string; mtimeMs: number; size: number }> = [];
 
+  let scannedSessionEntries = 0;
   for (const sessionsPath of getProjectSessionsPaths(cwd)) {
+    let handle;
     try {
       if (!lstatSync(sessionsPath).isDirectory()) {
         continue;
       }
 
-      for (const fileName of readdirSync(sessionsPath)) {
-        if (!fileName.endsWith(".jsonl")) continue;
-        const filePath = join(sessionsPath, fileName);
+      handle = opendirSync(sessionsPath);
+      let entry;
+      while (scannedSessionEntries < PROJECT_PROMPT_HISTORY_MAX_SCAN_ENTRIES && (entry = handle.readSync()) !== null) {
+        scannedSessionEntries++;
+        if (!entry.name.endsWith(".jsonl")) continue;
+        const filePath = join(sessionsPath, entry.name);
         const stats = lstatSync(filePath);
         if (!stats.isFile() || stats.size > PROJECT_PROMPT_HISTORY_MAX_FILE_BYTES) {
           continue;
         }
 
-        sessionFiles.push({ filePath, mtimeMs: stats.mtimeMs });
+        sessionFiles.push({ filePath, mtimeMs: stats.mtimeMs, size: stats.size });
+        if (sessionFiles.length > PROJECT_PROMPT_HISTORY_MAX_FILES) {
+          sessionFiles.sort((a, b) => b.mtimeMs - a.mtimeMs);
+          sessionFiles.length = PROJECT_PROMPT_HISTORY_MAX_FILES;
+        }
       }
     } catch (error) {
       if (!isFileNotFoundError(error)) {
         console.debug(`[powerline-footer] Skipping unreadable session path ${sessionsPath}:`, error);
       }
+    } finally {
+      handle?.closeSync();
+    }
+
+    if (scannedSessionEntries >= PROJECT_PROMPT_HISTORY_MAX_SCAN_ENTRIES) {
+      break;
     }
   }
 
   sessionFiles.sort((a, b) => b.mtimeMs - a.mtimeMs);
 
-  for (const { filePath } of sessionFiles.slice(0, PROJECT_PROMPT_HISTORY_MAX_FILES)) {
+  let totalBytesRead = 0;
+  for (const { filePath, size } of sessionFiles.slice(0, PROJECT_PROMPT_HISTORY_MAX_FILES)) {
+    if (totalBytesRead + size > PROJECT_PROMPT_HISTORY_MAX_TOTAL_BYTES) {
+      break;
+    }
+    totalBytesRead += size;
     let lines: string[];
     try {
       // Best-effort read: a session file collected during the lstat pass above can be
@@ -700,7 +725,16 @@ function readPersistedStashHistory(): string[] {
   const stashHistoryPath = getStashHistoryPath();
 
   try {
-    if (!canWritePowerlineStatePath(stashHistoryPath) || !lstatSync(stashHistoryPath).isFile()) {
+    if (!canWritePowerlineStatePath(stashHistoryPath)) {
+      return [];
+    }
+
+    const stats = lstatSync(stashHistoryPath);
+    if (!stats.isFile()) {
+      return [];
+    }
+    if (stats.size > STASH_HISTORY_MAX_FILE_BYTES) {
+      console.debug(`[powerline-footer] Ignoring oversized stash history at ${stashHistoryPath}`);
       return [];
     }
 
@@ -719,12 +753,16 @@ function readPersistedStashHistory(): string[] {
   }
 }
 
-function atomicWritePowerlineFile(targetPath: string, contents: string, label: string): boolean {
+function atomicWritePowerlineFile(targetPath: string, contents: string, label: string, validatePath?: (filePath: string) => boolean): boolean {
   let tempPath = "";
   try {
     mkdirSync(dirname(targetPath), { recursive: true });
+    if (validatePath && !validatePath(targetPath)) {
+      console.debug(`[powerline-footer] Refusing to persist ${label} through unsafe path ${targetPath}`);
+      return false;
+    }
     tempPath = `${targetPath}.${process.pid}.${Date.now()}.tmp`;
-    writeFileSync(tempPath, contents, { flag: "wx" });
+    writeFileSync(tempPath, contents, { flag: "wx", mode: 0o600 });
     try {
       if (lstatSync(targetPath).isSymbolicLink()) {
         console.debug(`[powerline-footer] Refusing to replace symlinked ${label} at ${targetPath}`);
@@ -768,7 +806,7 @@ function persistStashHistory(history: string[]): void {
       return;
     }
 
-    atomicWritePowerlineFile(stashHistoryPath, JSON.stringify(payload, null, 2) + "\n", "stash history");
+    atomicWritePowerlineFile(stashHistoryPath, JSON.stringify(payload, null, 2) + "\n", "stash history", canWritePowerlineStatePath);
   } catch (error) {
     if (!isFileNotFoundError(error)) {
       console.debug(`[powerline-footer] Failed to persist stash history to ${stashHistoryPath}:`, error);
@@ -777,7 +815,15 @@ function persistStashHistory(history: string[]): void {
 }
 
 function readSettings(cwd: string = process.cwd()): Record<string, unknown> {
-  return mergeSettings(readSettingsFile(getSettingsPath()), readSettingsFile(getProjectSettingsPath(cwd)));
+  const projectSettingsPath = getProjectSettingsPath(cwd);
+  const projectSettingsPathIsSafe = canWriteSettingsPath(projectSettingsPath);
+  const projectSettings = projectSettingsPathIsSafe
+    ? readSettingsFile(projectSettingsPath, { refuseSymlink: true })
+    : {};
+  if (!projectSettingsPathIsSafe) {
+    console.debug(`[powerline-footer] Ignoring unsafe settings path at ${projectSettingsPath}`);
+  }
+  return mergeSettings(readSettingsFile(getSettingsPath()), projectSettings);
 }
 
 export function writePowerlineSetting(cwd: string, update: (existingPowerlineSetting: unknown) => unknown): boolean {
@@ -810,7 +856,7 @@ export function writePowerlineSetting(cwd: string, update: (existingPowerlineSet
 
   settings.powerline = update(settings.powerline);
 
-  return atomicWritePowerlineFile(settingsPath, JSON.stringify(settings, null, 2) + "\n", "powerline setting");
+  return atomicWritePowerlineFile(settingsPath, JSON.stringify(settings, null, 2) + "\n", "powerline setting", canWriteSettingsPath);
 }
 
 function writePowerlinePresetSetting(preset: StatusLinePreset, cwd: string = process.cwd()): boolean {
@@ -848,6 +894,22 @@ function hasNonWhitespaceText(text: string): boolean {
   return text.trim().length > 0;
 }
 
+export function sanitizeSingleLineUiText(text: string): string {
+  return stripTerminalControlSequences(text).replace(/[\r\n\t]+/g, " ");
+}
+
+export function sanitizeClipboardText(text: string): string {
+  return stripTerminalControlSequences(text);
+}
+
+export function sanitizePromptInsertionText(text: string): string {
+  return sanitizeClipboardText(text);
+}
+
+function sanitizeStyledUiLine(text: string): string {
+  return stripUnsafeTerminalControlSequences(text).replace(/[\r\n\t]+/g, " ");
+}
+
 function isStaleExtensionContextError(error: unknown): boolean {
   return error instanceof Error && error.message.includes("This extension instance is stale");
 }
@@ -859,7 +921,7 @@ function getCurrentEditorText(ctx: any, editor: any): string {
 }
 
 function buildStashPreview(text: string, maxWidth: number): string {
-  const compact = text.replace(/\s+/g, " ").trim();
+  const compact = sanitizeSingleLineUiText(text).replace(/\s+/g, " ").trim();
   if (!compact) return "(empty)";
   return truncateToWidth(compact, maxWidth, "…");
 }
@@ -975,7 +1037,12 @@ function findShortcutReplacement(key: PowerlineShortcutKey, used: Set<string>): 
   return null;
 }
 
-function resolveShortcutConfig(settings: Record<string, unknown>): PowerlineShortcuts {
+function getBashModeToggleShortcutCandidate(settings: Record<string, unknown>): string {
+  const raw = isRecord(settings.bashMode) ? settings.bashMode : {};
+  return parseShortcutOverride(raw.toggleShortcut) ?? DEFAULT_BASH_MODE_SETTINGS.toggleShortcut;
+}
+
+function resolveShortcutConfig(settings: Record<string, unknown>, extraReservedShortcuts: readonly string[] = []): PowerlineShortcuts {
   const resolved: PowerlineShortcuts = { ...DEFAULT_SHORTCUTS };
   const shortcutSettings = settings.powerlineShortcuts;
 
@@ -989,6 +1056,9 @@ function resolveShortcutConfig(settings: Record<string, unknown>): PowerlineShor
   }
 
   const used = new Set(Array.from(reservedShortcuts(), shortcutUsageKey));
+  for (const shortcut of extraReservedShortcuts) {
+    used.add(shortcutUsageKey(shortcut));
+  }
 
   for (const key of SHORTCUT_KEYS) {
     const configured = resolved[key];
@@ -1016,24 +1086,34 @@ function resolveShortcutConfig(settings: Record<string, unknown>): PowerlineShor
   return resolved;
 }
 
-function parseBashModeSettings(settings: Record<string, unknown>): BashModeSettings {
+function parseBashModeSettings(settings: Record<string, unknown>, powerlineShortcuts?: PowerlineShortcuts): BashModeSettings {
   const raw = isRecord(settings.bashMode) ? settings.bashMode : {};
 
   const configuredToggleShortcut = parseShortcutOverride(raw.toggleShortcut);
-  const toggleShortcut = configuredToggleShortcut && !reservedShortcuts().has(shortcutUsageKey(configuredToggleShortcut))
-    ? configuredToggleShortcut
-    : DEFAULT_BASH_MODE_SETTINGS.toggleShortcut;
+  const candidateToggleShortcut = configuredToggleShortcut ?? DEFAULT_BASH_MODE_SETTINGS.toggleShortcut;
+  const used = new Set(Array.from(reservedShortcuts(), shortcutUsageKey));
+  if (powerlineShortcuts) {
+    for (const key of SHORTCUT_KEYS) {
+      used.add(shortcutUsageKey(powerlineShortcuts[key]));
+    }
+  }
+  const defaultToggleAvailable = !used.has(shortcutUsageKey(DEFAULT_BASH_MODE_SETTINGS.toggleShortcut));
+  const toggleShortcut = !used.has(shortcutUsageKey(candidateToggleShortcut))
+    ? candidateToggleShortcut
+    : defaultToggleAvailable
+      ? DEFAULT_BASH_MODE_SETTINGS.toggleShortcut
+      : candidateToggleShortcut;
 
-  if (configuredToggleShortcut && toggleShortcut !== configuredToggleShortcut) {
+  if (toggleShortcut !== candidateToggleShortcut) {
     console.debug(
-      `[powerline-footer] Bash mode shortcut conflict: "${configuredToggleShortcut}" replaced with "${toggleShortcut}"`,
+      `[powerline-footer] Bash mode shortcut conflict: "${candidateToggleShortcut}" replaced with "${toggleShortcut}"`,
     );
   }
   const transcriptMaxLines = typeof raw.transcriptMaxLines === "number" && Number.isFinite(raw.transcriptMaxLines)
-    ? Math.max(100, Math.floor(raw.transcriptMaxLines))
+    ? Math.min(BASH_TRANSCRIPT_MAX_LINES, Math.max(MIN_BASH_TRANSCRIPT_LINES, Math.floor(raw.transcriptMaxLines)))
     : DEFAULT_BASH_MODE_SETTINGS.transcriptMaxLines;
   const transcriptMaxBytes = typeof raw.transcriptMaxBytes === "number" && Number.isFinite(raw.transcriptMaxBytes)
-    ? Math.max(16 * 1024, Math.floor(raw.transcriptMaxBytes))
+    ? Math.min(BASH_TRANSCRIPT_MAX_BYTES, Math.max(MIN_BASH_TRANSCRIPT_BYTES, Math.floor(raw.transcriptMaxBytes)))
     : DEFAULT_BASH_MODE_SETTINGS.transcriptMaxBytes;
 
   return {
@@ -1163,11 +1243,13 @@ function applyResponsiveCompaction(
  * When terminal is wide enough, secondary segments move up to top bar.
  * When narrow, top bar segments overflow down to secondary row.
  */
-function computeResponsiveLayout(
+export function computeResponsiveLayout(
   ctx: SegmentContext,
   presetDef: ReturnType<typeof getPreset>,
   availableWidth: number
 ): { topContent: string; secondaryContent: string } {
+  const spinnerReserve = config.fixedEditor && config.inlineWorkingStatus ? SPINNER_SLOT_RESERVE : 0;
+  const topAvailableWidth = Math.max(1, availableWidth - spinnerReserve);
   const separatorDef = getSeparator(presetDef.separator);
   const sepWidth = measureVisibleWidth(separatorDef.left) + 2; // separator + spaces around it
   // In pill mode each segment gains cap columns and usually a trailing spacer;
@@ -1204,13 +1286,12 @@ function computeResponsiveLayout(
     // start of the top line (see reserveSpinnerSlot), which adds net columns.
     // Account for it here so the right group stays flush with the terminal edge
     // instead of overflowing and wrapping the rightmost segment's glyphs.
-    const spinnerReserve = config.fixedEditor && config.inlineWorkingStatus ? SPINNER_SLOT_RESERVE : 0;
     for (const stage of RESPONSIVE_COMPACTION_STAGES) {
       const compactLeft = applyResponsiveCompaction(leftRendered, stage, ctx);
       const compactRight = applyResponsiveCompaction(rightRendered, stage, ctx);
       const leftContent = buildContentFromParts(compactLeft, presetDef);
       const rightContent = buildContentFromParts(compactRight, presetDef);
-      const topContent = joinLeftRight(leftContent, rightContent, availableWidth - spinnerReserve);
+      const topContent = joinLeftRight(leftContent, rightContent, topAvailableWidth);
       if (topContent !== null) {
         return {
           topContent,
@@ -1239,7 +1320,7 @@ function computeResponsiveLayout(
   for (const seg of renderedSegments) {
     const neededWidth = seg.width + perSegOverhead + (topSegments.length > 0 ? gapWidth : 0);
     
-    if (!overflow && currentWidth + neededWidth <= availableWidth) {
+    if (!overflow && currentWidth + neededWidth <= topAvailableWidth) {
       topSegments.push({ id: seg.id, content: seg.content });
       currentWidth += neededWidth;
     } else {
@@ -1269,6 +1350,311 @@ function computeResponsiveLayout(
   };
 }
 
+const GIT_GLOBAL_OPTIONS_WITH_VALUE = new Set([
+  "-C",
+  "-c",
+  "--git-dir",
+  "--work-tree",
+  "--namespace",
+  "--config-env",
+  "--exec-path",
+]);
+
+const GIT_GLOBAL_OPTIONS_WITHOUT_VALUE = new Set([
+  "--bare",
+  "--no-pager",
+  "--paginate",
+  "-P",
+  "-p",
+  "--no-optional-locks",
+  "--literal-pathspecs",
+  "--glob-pathspecs",
+  "--noglob-pathspecs",
+  "--icase-pathspecs",
+  "--no-replace-objects",
+  "--no-lazy-fetch",
+]);
+
+const GIT_BRANCH_CHANGING_SUBCOMMANDS = new Set([
+  "checkout",
+  "switch",
+  "merge",
+  "rebase",
+  "pull",
+  "reset",
+  "worktree",
+  "commit",
+]);
+
+const GIT_BRANCH_STABLE_SUBCOMMANDS = new Set([
+  "add",
+  "archive",
+  "blame",
+  "bundle",
+  "cat-file",
+  "check-ignore",
+  "check-ref-format",
+  "clean",
+  "clone",
+  "config",
+  "count-objects",
+  "describe",
+  "diff",
+  "fetch",
+  "for-each-ref",
+  "fsck",
+  "gc",
+  "grep",
+  "help",
+  "init",
+  "log",
+  "ls-files",
+  "ls-remote",
+  "ls-tree",
+  "maintenance",
+  "mv",
+  "name-rev",
+  "notes",
+  "prune",
+  "remote",
+  "restore",
+  "rev-list",
+  "rev-parse",
+  "rm",
+  "shortlog",
+  "show",
+  "show-ref",
+  "status",
+  "submodule",
+  "tag",
+  "version",
+  "--version",
+]);
+
+function tokenizeShellCommandForGitDetection(cmd: string): string[] {
+  const tokens: string[] = [];
+  let current = "";
+  let quote: "'" | '"' | null = null;
+  let escaped = false;
+
+  const pushCurrent = () => {
+    if (!current) return;
+    tokens.push(current);
+    current = "";
+  };
+
+  for (const char of cmd) {
+    if (escaped) {
+      current += char;
+      escaped = false;
+      continue;
+    }
+
+    if (char === "\\") {
+      escaped = true;
+      continue;
+    }
+
+    if (quote) {
+      if (char === quote) {
+        quote = null;
+      } else {
+        current += char;
+      }
+      continue;
+    }
+
+    if (char === "'" || char === '"') {
+      quote = char;
+      continue;
+    }
+
+    if (/\s/.test(char) || char === ";" || char === "&" || char === "|" || char === "(" || char === ")") {
+      pushCurrent();
+      continue;
+    }
+
+    current += char;
+  }
+
+  pushCurrent();
+  return tokens;
+}
+
+function isGitCommandToken(token: string): boolean {
+  return token === "git" || token.endsWith("/git");
+}
+
+type GitInvocationParse = {
+  aliases: Map<string, string>;
+  subcommandIndex: number;
+};
+
+function recordShellAlias(aliases: Map<string, string>, value: string | undefined): void {
+  if (!value) return;
+  const separatorIndex = value.indexOf("=");
+  if (separatorIndex === -1) return;
+  const name = value.slice(0, separatorIndex);
+  const expansion = value.slice(separatorIndex + 1).trim();
+  if (!/^[A-Za-z_][A-Za-z0-9_-]*$/.test(name) || !expansion) return;
+  aliases.set(name, expansion);
+}
+
+function collectShellAliases(tokens: string[]): Map<string, string> {
+  const aliases = new Map<string, string>();
+  for (let index = 0; index < tokens.length; index++) {
+    if (tokens[index] !== "alias") continue;
+    for (let aliasIndex = index + 1; aliasIndex < tokens.length; aliasIndex++) {
+      const token = tokens[aliasIndex]!;
+      if (!token.includes("=")) break;
+      recordShellAlias(aliases, token);
+    }
+  }
+  return aliases;
+}
+
+function recordGitAliasConfig(aliases: Map<string, string>, value: string | undefined): void {
+  if (!value) return;
+  const separatorIndex = value.indexOf("=");
+  if (separatorIndex === -1) return;
+  const key = value.slice(0, separatorIndex).toLowerCase();
+  if (!key.startsWith("alias.")) return;
+  const name = key.slice("alias.".length);
+  const expansion = value.slice(separatorIndex + 1).trim();
+  if (!name || !expansion) return;
+  aliases.set(name, expansion);
+}
+
+function recordGitConfigEnvAlias(aliases: Map<string, string>, value: string | undefined): void {
+  if (!value) return;
+  const separatorIndex = value.indexOf("=");
+  if (separatorIndex === -1) return;
+  const key = value.slice(0, separatorIndex).toLowerCase();
+  if (!key.startsWith("alias.")) return;
+  const envName = value.slice(separatorIndex + 1);
+  recordGitAliasConfig(aliases, `${key}=${process.env[envName] ?? ""}`);
+}
+
+function parseGitInvocation(tokens: string[], start: number): GitInvocationParse {
+  const aliases = new Map<string, string>();
+  let index = start;
+  while (index < tokens.length) {
+    const token = tokens[index]!;
+    if (token === "-c") {
+      recordGitAliasConfig(aliases, tokens[index + 1]);
+      index += 2;
+      continue;
+    }
+    if (token === "--config-env") {
+      recordGitConfigEnvAlias(aliases, tokens[index + 1]);
+      index += 2;
+      continue;
+    }
+    if (GIT_GLOBAL_OPTIONS_WITH_VALUE.has(token)) {
+      index += 2;
+      continue;
+    }
+    if (token.startsWith("-c") && token.length > 2) {
+      recordGitAliasConfig(aliases, token.slice(2));
+      index++;
+      continue;
+    }
+    if (token.startsWith("--config-env=")) {
+      recordGitConfigEnvAlias(aliases, token.slice("--config-env=".length));
+      index++;
+      continue;
+    }
+    if (token.startsWith("-C") && token.length > 2) {
+      index++;
+      continue;
+    }
+    if (["--git-dir=", "--work-tree=", "--namespace=", "--exec-path="].some((prefix) => token.startsWith(prefix))) {
+      index++;
+      continue;
+    }
+    if (GIT_GLOBAL_OPTIONS_WITHOUT_VALUE.has(token)) {
+      index++;
+      continue;
+    }
+    return { aliases, subcommandIndex: index };
+  }
+  return { aliases, subcommandIndex: index };
+}
+
+function aliasExpansionMightChangeGitBranch(expansion: string, remainingTokens: string[], aliases: Map<string, string>, depth: number): boolean {
+  if (depth > 8) return true;
+  const trimmedExpansion = expansion.trim();
+  if (!trimmedExpansion) return false;
+  if (trimmedExpansion.startsWith("!")) {
+    return mightChangeGitBranchFromTokens(tokenizeShellCommandForGitDetection(trimmedExpansion.slice(1)).concat(remainingTokens), depth + 1);
+  }
+
+  const expandedTokens = tokenizeShellCommandForGitDetection(trimmedExpansion).concat(remainingTokens);
+  const subcommand = expandedTokens[0];
+  if (!subcommand) return false;
+  return gitSubcommandMightChangeBranch(subcommand, expandedTokens, 0, aliases, depth + 1);
+}
+
+function gitSubcommandMightChangeBranch(subcommand: string, tokens: string[], subcommandIndex: number, aliases: Map<string, string>, depth: number): boolean {
+  if (GIT_BRANCH_CHANGING_SUBCOMMANDS.has(subcommand)) {
+    return true;
+  }
+  if (subcommand === "stash" && ["pop", "apply"].includes(tokens[subcommandIndex + 1] ?? "")) {
+    return true;
+  }
+  if (subcommand === "branch") {
+    for (const branchOption of tokens.slice(subcommandIndex + 1)) {
+      if (!branchOption.startsWith("-")) continue;
+      if (/^-(?:.*[dDmM]|-delete|-move)$/.test(branchOption)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  const aliasExpansion = aliases.get(subcommand);
+  if (aliasExpansion) {
+    return aliasExpansionMightChangeGitBranch(aliasExpansion, tokens.slice(subcommandIndex + 1), aliases, depth);
+  }
+
+  // Git aliases are resolved from repository/global config at runtime, and this
+  // detector intentionally stays side-effect free. Unknown git subcommands may
+  // therefore be user aliases or external git-* commands; conservatively
+  // invalidate branch state unless the subcommand is known to be branch-stable.
+  return !GIT_BRANCH_STABLE_SUBCOMMANDS.has(subcommand);
+}
+
+function mightChangeGitBranchFromTokens(tokens: string[], depth = 0, shellAliases = collectShellAliases(tokens)): boolean {
+  if (depth > 8) return true;
+  for (let index = 0; index < tokens.length; index++) {
+    const token = tokens[index]!;
+    if (isGitCommandToken(token)) {
+      const { aliases, subcommandIndex } = parseGitInvocation(tokens, index + 1);
+      const subcommand = tokens[subcommandIndex];
+      if (!subcommand) continue;
+      if (gitSubcommandMightChangeBranch(subcommand, tokens, subcommandIndex, aliases, depth)) {
+        return true;
+      }
+      continue;
+    }
+
+    const shellAliasExpansion = shellAliases.get(token);
+    if (shellAliasExpansion) {
+      const expandedTokens = tokenizeShellCommandForGitDetection(shellAliasExpansion).concat(tokens.slice(index + 1));
+      if (mightChangeGitBranchFromTokens(expandedTokens, depth + 1, shellAliases)) {
+        return true;
+      }
+    }
+  }
+
+  return false;
+}
+
+export function mightChangeGitBranch(cmd: string): boolean {
+  const tokens = tokenizeShellCommandForGitDetection(cmd);
+  return mightChangeGitBranchFromTokens(tokens, 0, collectShellAliases(tokens));
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Extension
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1277,8 +1663,9 @@ export default function powerlineFooter(pi: ExtensionAPI) {
   const startupSettings = readSettings();
   config = parsePowerlineConfig(startupSettings.powerline, PRESET_NAMES);
   setNerdFontsPreference(config.nerdFonts);
-  let resolvedShortcuts = resolveShortcutConfig(startupSettings);
-  let bashModeSettings = parseBashModeSettings(startupSettings);
+  let bashToggleShortcutCandidate = getBashModeToggleShortcutCandidate(startupSettings);
+  let resolvedShortcuts = resolveShortcutConfig(startupSettings, [bashToggleShortcutCandidate]);
+  let bashModeSettings = parseBashModeSettings(startupSettings, resolvedShortcuts);
 
   let enabled = true;
   let sessionStartTime = Date.now();
@@ -1309,6 +1696,7 @@ export default function powerlineFooter(pi: ExtensionAPI) {
   let bashTranscript = new BashTranscriptStore(bashModeSettings);
   let bashCompletionEngine = new BashCompletionEngine();
   let shellSession: ManagedShellSession | null = null;
+  let userBashGitRefreshTimers: Array<ReturnType<typeof setTimeout>> = [];
   
   // Cache for the top and secondary powerline widgets.
   let lastLayoutWidth = 0;
@@ -1317,6 +1705,8 @@ export default function powerlineFooter(pi: ExtensionAPI) {
   let layoutDirty = true;
   let forceNextLayoutRecompute = false;
   let lastEditorInputAt = 0;
+  let lastStatusLinesWidth = 0;
+  let lastStatusLinesResult: string[] | null = null;
   let cachedPresetKey: string | null = null;
   let cachedPresetDef: ReturnType<typeof getPreset> | null = null;
   let cachedSessionSummary: {
@@ -1363,9 +1753,15 @@ export default function powerlineFooter(pi: ExtensionAPI) {
     tuiRef?.requestRender();
   }, STATUS_RENDER_DEBOUNCE_MS);
 
+  const resetStatusLinesCache = () => {
+    lastStatusLinesWidth = 0;
+    lastStatusLinesResult = null;
+  };
+
   const resetLayoutCache = () => {
     lastLayoutResult = null;
     layoutDirty = true;
+    resetStatusLinesCache();
   };
 
   const resetPresetCache = () => {
@@ -1381,6 +1777,7 @@ export default function powerlineFooter(pi: ExtensionAPI) {
     layoutDirty = true;
     statusRenderScheduler.schedule(delayMs);
   };
+  setGitStatusUpdateListener(() => requestStatusRender());
 
   const requestImmediateStatusRender = (options: { deferDuringTyping?: boolean } = {}) => {
     layoutDirty = true;
@@ -1392,6 +1789,13 @@ export default function powerlineFooter(pi: ExtensionAPI) {
     forceNextLayoutRecompute = true;
     statusRenderScheduler.cancel();
     statusRenderScheduler.schedule(0);
+  };
+
+  const cancelUserBashGitRefreshTimers = () => {
+    for (const timer of userBashGitRefreshTimers) {
+      clearTimeout(timer);
+    }
+    userBashGitRefreshTimers = [];
   };
 
   const installFooterStatusRepaintHook = (footerData: ReadonlyFooterDataProvider) => {
@@ -1407,16 +1811,28 @@ export default function powerlineFooter(pi: ExtensionAPI) {
     const originalSetExtensionStatus = writableFooterData.setExtensionStatus;
     const originalClearExtensionStatuses = writableFooterData.clearExtensionStatuses;
     const setExtensionStatusAndRepaint = function setExtensionStatusAndRepaint(this: unknown, key: string, text: string | undefined) {
+      const statuses = footerData.getExtensionStatuses();
+      const hadPrevious = statuses.has(key);
+      const previous = statuses.get(key);
+      if ((text === undefined && !hadPrevious) || (text !== undefined && hadPrevious && previous === text)) {
+        return;
+      }
+
       originalSetExtensionStatus.call(this, key, text);
-      requestImmediateStatusRender();
+      resetStatusLinesCache();
+      requestStatusRender();
     };
     writableFooterData.setExtensionStatus = setExtensionStatusAndRepaint;
 
     let clearExtensionStatusesAndRepaint: (() => void) | null = null;
     if (typeof originalClearExtensionStatuses === "function") {
       clearExtensionStatusesAndRepaint = function clearExtensionStatusesAndRepaint(this: unknown) {
+        if (footerData.getExtensionStatuses().size === 0) {
+          return;
+        }
         originalClearExtensionStatuses.call(this);
-        requestImmediateStatusRender();
+        resetStatusLinesCache();
+        requestStatusRender();
       };
       writableFooterData.clearExtensionStatuses = clearExtensionStatusesAndRepaint;
     }
@@ -1449,6 +1865,12 @@ export default function powerlineFooter(pi: ExtensionAPI) {
         bashTranscript,
         requestStatusRender,
         (command, cwd) => appendProjectHistory(currentCtx?.cwd ?? process.cwd(), command, cwd),
+        {
+          onCommandComplete: () => {
+            invalidateGitStatus();
+            invalidateGitBranch();
+          },
+        },
       );
     }
     await shellSession.ensureReady();
@@ -1520,7 +1942,8 @@ export default function powerlineFooter(pi: ExtensionAPI) {
         const selectList = new SelectList(items, maxVisible, overlaySelectListTheme(theme));
         const border = (text: string) => theme.fg("dim", text);
         const wrapRow = (text: string, innerWidth: number): string => {
-          return `${border("│")}${truncateToWidth(text, innerWidth, "…", true)}${border("│")}`;
+          const safeText = sanitizeStyledUiLine(text);
+          return `${border("│")}${truncateToWidth(safeText, innerWidth, "…", true)}${border("│")}`;
         };
 
         selectList.onSelect = (item) => done(item);
@@ -1576,8 +1999,10 @@ export default function powerlineFooter(pi: ExtensionAPI) {
     stashedEditorText = null;
 
     const settings = readSettings(ctx.cwd);
-    bashModeSettings = parseBashModeSettings(settings);
-    resolvedShortcuts = resolveShortcutConfig(settings);
+    bashToggleShortcutCandidate = getBashModeToggleShortcutCandidate(settings);
+    resolvedShortcuts = resolveShortcutConfig(settings, [bashToggleShortcutCandidate]);
+    bashModeSettings = parseBashModeSettings(settings, resolvedShortcuts);
+    registerCurrentShortcutBindings();
     showLastPrompt = settings.showLastPrompt !== false;
     config = parsePowerlineConfig(settings.powerline, PRESET_NAMES);
     resetPresetCache();
@@ -1629,6 +2054,7 @@ export default function powerlineFooter(pi: ExtensionAPI) {
     welcomeOverlayShouldDismiss = false;
     welcomeDismissScheduler.cancel();
     statusRenderScheduler.cancel();
+    cancelUserBashGitRefreshTimers();
     restoreFooterStatusRepaintHook?.();
     restoreFooterStatusRepaintHook = null;
     teardownFixedEditorCompositor(isTerminalExit ? { resetExtendedKeyboardModes: true } : undefined);
@@ -1647,46 +2073,55 @@ export default function powerlineFooter(pi: ExtensionAPI) {
     resetLayoutCache();
   });
 
-  // Check if a bash command might change git branch
-  const mightChangeGitBranch = (cmd: string): boolean => {
-    const gitBranchPatterns = [
-      /\bgit\s+(checkout|switch|branch\s+-[dDmM]|merge|rebase|pull|reset|worktree)/,
-      /\bgit\s+stash\s+(pop|apply)/,
-    ];
-    return gitBranchPatterns.some(p => p.test(cmd));
-  };
-
   // Invalidate git status on file changes, trigger re-render on potential branch changes
   pi.on("tool_result", async (event) => {
     if (event.toolName === "write" || event.toolName === "edit") {
       invalidateGitStatus();
+      setTimeout(() => requestStatusRender(), 100);
     }
-    // Check for bash commands that might change git branch
+    // Bash can mutate git state through aliases, functions, scripts, or shell
+    // syntax that a static detector may miss, so clear both caches after every
+    // completed bash command.
     if (event.toolName === "bash" && event.input?.command) {
-      const cmd = String(event.input.command);
-      if (mightChangeGitBranch(cmd)) {
-        // Invalidate caches since working tree state changes with branch
-        invalidateGitStatus();
-        invalidateGitBranch();
-        // Small delay to let git update, then re-render
-        setTimeout(() => requestStatusRender(), 100);
-      }
+      invalidateGitStatus();
+      invalidateGitBranch();
+      // Small delay to let filesystem/git updates settle, then re-render.
+      setTimeout(() => requestStatusRender(), 100);
     }
   });
 
-  // Also catch user escape commands (! prefix)
-  // Note: This fires BEFORE execution, so we use a longer delay and multiple re-renders
-  // to ensure we catch the update after the command completes.
-  pi.on("user_bash", async (event) => {
-    if (mightChangeGitBranch(event.command)) {
-      // Invalidate immediately so next render fetches fresh data
+  const USER_BASH_REFRESH_DELAYS_MS = [100, 300, 500, 1_000, 2_000, 5_000, 10_000, 30_000] as const;
+
+  const scheduleUserBashGitRefresh = (_command: string): void => {
+    cancelUserBashGitRefreshTimers();
+    const refreshGeneration = sessionGeneration;
+    const invalidate = () => {
       invalidateGitStatus();
       invalidateGitBranch();
-      // Multiple staggered re-renders to catch fast and slow commands
-      setTimeout(() => requestStatusRender(), 100);
-      setTimeout(() => requestStatusRender(), 300);
-      setTimeout(() => requestStatusRender(), 500);
+    };
+    const invalidateAndRender = (timer: ReturnType<typeof setTimeout>) => {
+      userBashGitRefreshTimers = userBashGitRefreshTimers.filter((candidate) => candidate !== timer);
+      if (refreshGeneration !== sessionGeneration || !enabled || !currentCtx) return;
+      invalidate();
+      requestStatusRender();
+    };
+
+    // user_bash fires before execution. Invalidate now, then invalidate again
+    // immediately before each delayed render so an early pre-command fetch cannot
+    // keep later renders on a fresh-but-stale cache entry. Only the newest command
+    // keeps a delayed refresh tail; stale timers are cancelled/guarded so repeated
+    // shell commands do not cause 30s of unrelated repaint churn.
+    invalidate();
+    for (const delayMs of USER_BASH_REFRESH_DELAYS_MS) {
+      let timer: ReturnType<typeof setTimeout>;
+      timer = setTimeout(() => invalidateAndRender(timer), delayMs);
+      userBashGitRefreshTimers.push(timer);
     }
+  };
+
+  // Also catch user escape commands (! prefix)
+  pi.on("user_bash", async (event) => {
+    scheduleUserBashGitRefresh(event.command);
   });
 
   pi.on("model_select", async (_event, ctx) => {
@@ -1704,6 +2139,7 @@ export default function powerlineFooter(pi: ExtensionAPI) {
     currentCtx = ctx;
     currentThinkingLevel = null;
     liveAssistantUsage = null;
+    resetSessionSummaryCache();
     requestImmediateStatusRender({ deferDuringTyping: false });
   });
 
@@ -1711,7 +2147,7 @@ export default function powerlineFooter(pi: ExtensionAPI) {
   pi.on("before_agent_start", async (event, ctx) => {
     lastUserPrompt = event.prompt;
     if (ctx.hasUI) {
-      onVibeBeforeAgentStart(event.prompt, ctx.ui.setWorkingMessage);
+      onVibeBeforeAgentStart(event.prompt, (message) => ctx.ui.setWorkingMessage(message));
     }
   });
 
@@ -1720,7 +2156,7 @@ export default function powerlineFooter(pi: ExtensionAPI) {
   pi.on("agent_start", async (_event, ctx) => {
     isStreaming = true;
     liveAssistantUsage = null;
-    onVibeAgentStart();
+    onVibeAgentStart(ctx.hasUI ? (message) => ctx.ui.setWorkingMessage(message) : undefined);
     dismissWelcome(ctx);
     currentCtx = ctx;
   });
@@ -1761,7 +2197,7 @@ export default function powerlineFooter(pi: ExtensionAPI) {
     if (ctx.hasUI) {
       // Extract recent agent context from session for richer vibe generation
       const agentContext = getRecentAgentContext(ctx);
-      onVibeToolCall(event.toolName, event.input, ctx.ui.setWorkingMessage, agentContext);
+      onVibeToolCall(event.toolName, event.input, (message) => ctx.ui.setWorkingMessage(message), agentContext);
     }
   });
   
@@ -1821,10 +2257,17 @@ export default function powerlineFooter(pi: ExtensionAPI) {
     persistStashHistory(stashedPromptHistory);
   }
 
-  function copyTextToClipboard(ctx: any, text: string, successMessage?: string): void {
-    copyToClipboard(text);
-    if (successMessage) {
-      ctx.ui.notify(successMessage, "info");
+  async function copyTextToClipboard(ctx: any, text: string, successMessage?: string): Promise<boolean> {
+    try {
+      await copyToClipboard(sanitizeClipboardText(text));
+      if (successMessage) {
+        ctx.ui.notify(successMessage, "info");
+      }
+      return true;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      ctx.ui.notify(`Failed to copy to clipboard: ${sanitizeSingleLineUiText(message)}`, "error");
+      return false;
     }
   }
 
@@ -1909,9 +2352,15 @@ export default function powerlineFooter(pi: ExtensionAPI) {
   }
 
   async function insertSelectedPromptHistoryEntry(ctx: any, selected: string): Promise<void> {
+    const selectedText = sanitizePromptInsertionText(selected);
+    if (!hasNonWhitespaceText(selectedText)) {
+      ctx.ui.notify("Selected prompt is empty", "info");
+      return;
+    }
+
     const currentText = getCurrentEditorText(ctx, currentEditor);
     if (!hasNonWhitespaceText(currentText)) {
-      ctx.ui.setEditorText(selected);
+      ctx.ui.setEditorText(selectedText);
       ctx.ui.notify("Inserted prompt", "info");
       return;
     }
@@ -1919,14 +2368,14 @@ export default function powerlineFooter(pi: ExtensionAPI) {
     const action = await ctx.ui.select("Insert prompt", ["Replace", "Append", "Cancel"]);
 
     if (action === "Replace") {
-      ctx.ui.setEditorText(selected);
+      ctx.ui.setEditorText(selectedText);
       ctx.ui.notify("Replaced editor with prompt", "info");
       return;
     }
 
     if (action === "Append") {
-      const separator = currentText.endsWith("\n") || selected.startsWith("\n") ? "" : "\n";
-      ctx.ui.setEditorText(`${currentText}${separator}${selected}`);
+      const separator = currentText.endsWith("\n") || selectedText.startsWith("\n") ? "" : "\n";
+      ctx.ui.setEditorText(`${currentText}${separator}${selectedText}`);
       ctx.ui.notify("Appended prompt", "info");
     }
   }
@@ -1976,9 +2425,14 @@ export default function powerlineFooter(pi: ExtensionAPI) {
     return chatJumpAction ? { kind: "chat", action: chatJumpAction } : null;
   }
 
-  function runPowerlineShortcut(ctx: any, action: PowerlineShortcutAction): void {
+  async function runPowerlineShortcut(ctx: any, action: PowerlineShortcutAction): Promise<void> {
+    if (action.kind === "stashEditor") {
+      stashOrRestoreEditorText(ctx);
+      return;
+    }
+
     if (action.kind === "stashHistory") {
-      void openStashHistory(ctx);
+      await openStashHistory(ctx);
       return;
     }
 
@@ -1986,16 +2440,20 @@ export default function powerlineFooter(pi: ExtensionAPI) {
       const text = getEditorTextForClipboard(ctx);
       if (!text) return;
 
-      copyTextToClipboard(ctx, text, action.kind === "copyEditor" ? "Copied editor text" : undefined);
-      if (action.kind === "cutEditor") {
-        ctx.ui.setEditorText("");
-        ctx.ui.notify("Cut editor text", "info");
+      const copied = await copyTextToClipboard(ctx, text, action.kind === "copyEditor" ? "Copied editor text" : undefined);
+      if (action.kind === "cutEditor" && copied) {
+        if (getCurrentEditorText(ctx, currentEditor) === text) {
+          ctx.ui.setEditorText("");
+          ctx.ui.notify("Cut editor text", "info");
+        } else {
+          ctx.ui.notify("Copied editor text; editor changed before cut could clear it", "warning");
+        }
       }
       return;
     }
 
     if (action.kind === "bashMode") {
-      void setBashModeActive(!bashModeActive, ctx);
+      await setBashModeActive(!bashModeActive, ctx);
       return;
     }
 
@@ -2064,7 +2522,7 @@ export default function powerlineFooter(pi: ExtensionAPI) {
     liveAssistantUsage = null;
     currentCtx = ctx;
     if (ctx.hasUI) {
-      onVibeAgentEnd(ctx.ui.setWorkingMessage); // working-vibes internal state + reset message
+      onVibeAgentEnd((message) => ctx.ui.setWorkingMessage(message)); // working-vibes internal state + reset message
       if (stashedEditorText !== null) {
         if (ctx.ui.getEditorText().trim() === "") {
           ctx.ui.setEditorText(stashedEditorText);
@@ -2239,65 +2697,61 @@ export default function powerlineFooter(pi: ExtensionAPI) {
     },
   });
 
-  pi.registerShortcut(bashModeSettings.toggleShortcut, {
-    description: "Toggle bash mode",
-    handler: async (ctx) => {
-      if (!enabled || !ctx.hasUI) return;
-      await setBashModeActive(!bashModeActive, ctx);
-    },
-  });
+  // A shortcut key, once registered with the host, is matched and its keypress
+  // swallowed for the rest of the extension's lifetime — there is no
+  // unregisterShortcut API. When a session reload remaps an action to a new key,
+  // the old key string stays registered. Without a recorded action it would
+  // resolve to null and become a dead key that silently eats input. Remember the
+  // last action each key was registered for so an abandoned key keeps working
+  // instead of going inert.
+  const registeredShortcutActions = new Map<string, PowerlineShortcutAction>();
 
-  pi.registerShortcut("alt+s", {
-    description: "Stash/restore editor text",
-    handler: async (ctx) => {
-      if (!enabled || !ctx.hasUI) return;
-      stashOrRestoreEditorText(ctx);
-    },
-  });
+  function getRegisteredShortcutAction(shortcut: string): PowerlineShortcutAction | null {
+    const key = shortcutUsageKey(shortcut);
 
-  pi.registerShortcut(resolvedShortcuts.stashHistory, {
-    description: "Open prompt history picker",
-    handler: async (ctx) => {
-      if (!enabled || !ctx.hasUI) return;
-      await openStashHistory(ctx);
-    },
-  });
+    if (key === shortcutUsageKey("alt+s")) return { kind: "stashEditor" };
+    if (key === shortcutUsageKey(bashModeSettings.toggleShortcut)) return { kind: "bashMode" };
+    if (key === shortcutUsageKey(resolvedShortcuts.stashHistory)) return { kind: "stashHistory" };
+    if (key === shortcutUsageKey(resolvedShortcuts.copyEditor)) return { kind: "copyEditor" };
+    if (key === shortcutUsageKey(resolvedShortcuts.cutEditor)) return { kind: "cutEditor" };
 
-  pi.registerShortcut(resolvedShortcuts.copyEditor, {
-    description: "Copy full editor text",
-    handler: async (ctx) => {
-      if (!enabled || !ctx.hasUI) return;
+    for (const { shortcutKey, action } of CHAT_JUMP_SHORTCUTS) {
+      if (key === shortcutUsageKey(resolvedShortcuts[shortcutKey])) {
+        return { kind: "chat", action };
+      }
+    }
 
-      const text = getEditorTextForClipboard(ctx);
-      if (!text) return;
+    // Fall back to the last action a now-remapped key was registered for so it
+    // does not dead-swallow input (see registeredShortcutActions above).
+    return registeredShortcutActions.get(key) ?? null;
+  }
 
-      copyTextToClipboard(ctx, text, "Copied editor text");
-    },
-  });
-
-  pi.registerShortcut(resolvedShortcuts.cutEditor, {
-    description: "Cut full editor text",
-    handler: async (ctx) => {
-      if (!enabled || !ctx.hasUI) return;
-
-      const text = getEditorTextForClipboard(ctx);
-      if (!text) return;
-
-      copyTextToClipboard(ctx, text);
-      ctx.ui.setEditorText("");
-      ctx.ui.notify("Cut editor text", "info");
-    },
-  });
-
-  for (const { shortcutKey, description, action } of CHAT_JUMP_SHORTCUTS) {
-    pi.registerShortcut(resolvedShortcuts[shortcutKey], {
+  function registerDynamicShortcut(shortcut: string, description: string, action: PowerlineShortcutAction): void {
+    registeredShortcutActions.set(shortcutUsageKey(shortcut), action);
+    pi.registerShortcut(shortcut, {
       description,
       handler: async (ctx) => {
         if (!enabled || !ctx.hasUI) return;
-        runPowerlineShortcut(ctx, { kind: "chat", action });
+        const resolved = getRegisteredShortcutAction(shortcut);
+        if (!resolved) return;
+        await runPowerlineShortcut(ctx, resolved);
       },
     });
   }
+
+  function registerCurrentShortcutBindings(): void {
+    registerDynamicShortcut(bashModeSettings.toggleShortcut, "Toggle bash mode", { kind: "bashMode" });
+    registerDynamicShortcut("alt+s", "Stash/restore editor text", { kind: "stashEditor" });
+    registerDynamicShortcut(resolvedShortcuts.stashHistory, "Open prompt history picker", { kind: "stashHistory" });
+    registerDynamicShortcut(resolvedShortcuts.copyEditor, "Copy full editor text", { kind: "copyEditor" });
+    registerDynamicShortcut(resolvedShortcuts.cutEditor, "Cut full editor text", { kind: "cutEditor" });
+
+    for (const { shortcutKey, description, action } of CHAT_JUMP_SHORTCUTS) {
+      registerDynamicShortcut(resolvedShortcuts[shortcutKey], description, { kind: "chat", action });
+    }
+  }
+
+  registerCurrentShortcutBindings();
 
   // Command to set working message theme
   pi.registerCommand("vibe", {
@@ -2333,10 +2787,11 @@ export default function powerlineFooter(pi: ExtensionAPI) {
           return;
         }
         const persisted = setVibeModel(modelSpec);
+        const displayModelSpec = getVibeModel();
         if (persisted) {
-          ctx.ui.notify(`Vibe model set to: ${modelSpec}`, "info");
+          ctx.ui.notify(`Vibe model set to: ${displayModelSpec}`, "info");
         } else {
-          ctx.ui.notify(`Vibe model set to: ${modelSpec} (not persisted; check settings.json)`, "warning");
+          ctx.ui.notify(`Vibe model set to: ${displayModelSpec} (not persisted; check settings.json)`, "warning");
         }
         return;
       }
@@ -2376,14 +2831,17 @@ export default function powerlineFooter(pi: ExtensionAPI) {
         }
 
         const { theme, count } = parsed;
-        ctx.ui.notify(`Generating ${count} vibes for "${theme}"...`, "info");
+        const displayTheme = sanitizeSingleLineUiText(theme).trim() || "(empty)";
+        ctx.ui.notify(`Generating ${count} vibes for "${displayTheme}"...`, "info");
 
         const result = await generateVibesBatch(theme, count);
         
         if (result.success) {
-          ctx.ui.notify(`Generated ${result.count} vibes for "${theme}" → ${result.filePath}`, "info");
+          const displayFilePath = sanitizeSingleLineUiText(result.filePath).trim();
+          ctx.ui.notify(`Generated ${result.count} vibes for "${displayTheme}" → ${displayFilePath}`, "info");
         } else {
-          ctx.ui.notify(`Failed to generate vibes: ${result.error}`, "error");
+          const displayError = sanitizeSingleLineUiText(result.error ?? "unknown error").trim();
+          ctx.ui.notify(`Failed to generate vibes: ${displayError}`, "error");
         }
         return;
       }
@@ -2403,13 +2861,14 @@ export default function powerlineFooter(pi: ExtensionAPI) {
       const theme = args.trim();
       const persisted = setVibeTheme(theme);
       const mode = getVibeMode();
-      if (mode === "file" && !hasVibeFile(theme)) {
+      const displayTheme = getVibeTheme() || sanitizeSingleLineUiText(theme).trim() || "(empty)";
+      if (mode === "file" && !hasVibeFile(displayTheme)) {
         const suffix = persisted ? "" : " (not persisted; check settings.json)";
-        ctx.ui.notify(`Vibe set to: ${theme} (file mode, but no file found - run /vibe generate ${theme})${suffix}`, "warning");
+        ctx.ui.notify(`Vibe set to: ${displayTheme} (file mode, but no file found - run /vibe generate ${displayTheme})${suffix}`, "warning");
       } else if (persisted) {
-        ctx.ui.notify(`Vibe set to: ${theme}`, "info");
+        ctx.ui.notify(`Vibe set to: ${displayTheme}`, "info");
       } else {
-        ctx.ui.notify(`Vibe set to: ${theme} (not persisted; check settings.json)`, "warning");
+        ctx.ui.notify(`Vibe set to: ${displayTheme} (not persisted; check settings.json)`, "warning");
       }
     },
   });
@@ -2478,7 +2937,8 @@ export default function powerlineFooter(pi: ExtensionAPI) {
 
     // Get git status (cached)
     const gitBranch = footerDataRef?.getGitBranch() ?? null;
-    const gitStatus = getGitStatus(gitBranch, segmentOptions.git?.polling, ctx.cwd ?? process.cwd());
+    const gitCwd = bashModeActive && shellSession?.state.cwd ? shellSession.state.cwd : (ctx.cwd ?? process.cwd());
+    const gitStatus = getGitStatus(gitBranch, segmentOptions.git?.polling, gitCwd);
     const extensionStatuses = footerDataRef?.getExtensionStatuses() ?? new Map();
     const customItemsById = new Map(config.customItems.map((item) => [item.id, item]));
     const hiddenExtensionStatusKeys = collectHiddenExtensionStatusKeys(config.customItems);
@@ -2562,11 +3022,25 @@ export default function powerlineFooter(pi: ExtensionAPI) {
     return lastLayoutResult;
   }
 
+  function cachePowerlineStatusLines(width: number, lines: string[]): string[] {
+    lastStatusLinesWidth = width;
+    lastStatusLinesResult = lines;
+    return lines;
+  }
+
   function renderPowerlineStatusLines(width: number): string[] {
-    if (!currentCtx || !footerDataRef) return [];
+    if (
+      lastStatusLinesResult
+      && lastStatusLinesWidth === width
+      && Date.now() - lastEditorInputAt < EDITOR_STATUS_DEFER_MS
+    ) {
+      return lastStatusLinesResult;
+    }
+
+    if (!currentCtx || !footerDataRef) return cachePowerlineStatusLines(width, []);
 
     const statuses = footerDataRef.getExtensionStatuses();
-    if (!statuses || statuses.size === 0) return [];
+    if (!statuses || statuses.size === 0) return cachePowerlineStatusLines(width, []);
     const hiddenExtensionStatusKeys = collectHiddenExtensionStatusKeys(config.customItems);
 
     const notifications: string[] = [];
@@ -2577,7 +3051,7 @@ export default function powerlineFooter(pi: ExtensionAPI) {
       }
     }
 
-    return notifications;
+    return cachePowerlineStatusLines(width, notifications);
   }
 
   function renderPowerlineTopLines(width: number, theme: Theme): string[] {
@@ -2632,7 +3106,7 @@ export default function powerlineFooter(pi: ExtensionAPI) {
     const availableWidth = width - measureVisibleWidth(prefix);
     if (availableWidth < 10) return [];
 
-    let promptText = lastUserPrompt.replace(/\s+/g, " ").trim();
+    let promptText = sanitizeSingleLineUiText(lastUserPrompt).replace(/\s+/g, " ").trim();
     if (!promptText) return [];
 
     promptText = truncateToWidth(promptText, availableWidth, "…");
@@ -2714,7 +3188,7 @@ export default function powerlineFooter(pi: ExtensionAPI) {
         up: resolvedShortcuts.scrollChatUp,
         down: resolvedShortcuts.scrollChatDown,
       },
-      onCopySelection: (text) => copyTextToClipboard(ctx, text),
+      onCopySelection: (text) => void copyTextToClipboard(ctx, text),
       getShowHardwareCursor: () => typeof tui.getShowHardwareCursor === "function" && tui.getShowHardwareCursor(),
       renderCluster: (width, terminalRows) => {
         const theme = readRenderTheme();
@@ -2932,7 +3406,7 @@ export default function powerlineFooter(pi: ExtensionAPI) {
           return undefined;
         }
 
-        runPowerlineShortcut(ctx, powerlineShortcutAction);
+        void runPowerlineShortcut(ctx, powerlineShortcutAction);
         scheduleDismissWelcome(ctx);
         tuiRef?.requestRender();
         return { consume: true };
@@ -3048,7 +3522,7 @@ export default function powerlineFooter(pi: ExtensionAPI) {
 
         const powerlineShortcutAction = getPowerlineShortcutAction(data);
         if (powerlineShortcutAction) {
-          runPowerlineShortcut(ctx, powerlineShortcutAction);
+          void runPowerlineShortcut(ctx, powerlineShortcutAction);
           scheduleDismissWelcome(ctx);
           return;
         }

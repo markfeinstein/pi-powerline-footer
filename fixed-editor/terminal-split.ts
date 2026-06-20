@@ -1,5 +1,6 @@
 import { deleteAllKittyImages, isKeyRelease, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { matchesConfiguredShortcut } from "../shortcuts.ts";
+import { stripTerminalControlSequences, stripUnsafeTerminalControlSequences } from "../sanitize.ts";
 import type { FixedEditorClusterRender } from "./cluster.ts";
 
 export interface TerminalLike {
@@ -37,6 +38,13 @@ interface RenderPassCluster {
   width: number;
   terminalRows: number;
   cluster: FixedEditorClusterRender;
+}
+
+interface FixedClusterPaintCache {
+  width: number;
+  terminalRows: number;
+  showHardwareCursor: boolean;
+  signature: string;
 }
 
 type CompositeLineAt = (
@@ -232,12 +240,8 @@ function isMouseRelease(packet: SgrMousePacket): boolean {
   return packet.final === "m";
 }
 
-function stripOscSequences(line: string): string {
-  return line.replace(/\x1b\][^\x07]*(?:\x07|\x1b\\)/g, "");
-}
-
 function stripAnsi(line: string): string {
-  return stripOscSequences(line).replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, "");
+  return stripTerminalControlSequences(line);
 }
 
 const graphemeSegmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
@@ -280,16 +284,53 @@ function readRows(terminal: TerminalLike, descriptor: PropertyDescriptor | undef
   return typeof value === "number" && Number.isFinite(value) ? value : 24;
 }
 
+function sanitizeDisplayLine(line: string): string {
+  return stripUnsafeTerminalControlSequences(line).replace(/[\r\n\t]/g, " ");
+}
+
 function sanitizeLine(line: string, width: number): string {
-  return visibleWidth(line) > width ? truncateToWidth(line, width, "", true) : line;
+  const safeLine = sanitizeDisplayLine(line);
+  return visibleWidth(safeLine) > width ? truncateToWidth(safeLine, width, "", true) : safeLine;
 }
 
 function sanitizeOverlayBaseLine(line: string, width: number): string {
-  return sanitizeLine(stripOscSequences(line), width);
+  return sanitizeLine(line, width);
 }
 
 function normalizeOverlayCompositionLine(line: string): string {
   return line.includes("\t") ? line.replace(/\t/g, "   ") : line;
+}
+
+function appendFixedClusterCursorPark(
+  buffer: string,
+  cluster: FixedEditorClusterRender,
+  terminalRows: number,
+  showHardwareCursor: boolean,
+): string {
+  if (cluster.lines.length === 0) return buffer;
+
+  const startRow = Math.max(1, terminalRows - cluster.lines.length + 1);
+  if (cluster.cursor) {
+    // Keep the real terminal cursor parked at the logical editor cursor even
+    // when it is visually hidden. macOS IME candidate windows anchor to the
+    // terminal cursor position, so skipping the move when PI_HARDWARE_CURSOR is
+    // off leaves the candidate window at a stale/offset location.
+    buffer += moveCursor(startRow + cluster.cursor.row, Math.max(1, cluster.cursor.col + 1));
+    buffer += showHardwareCursor ? showCursor() : hideCursor();
+  } else {
+    buffer += hideCursor();
+  }
+
+  return buffer;
+}
+
+function fixedClusterSignature(cluster: FixedEditorClusterRender): string {
+  let signature = `${cluster.lines.length}:${cluster.cursor?.row ?? -1}:${cluster.cursor?.col ?? -1}`;
+  for (const line of cluster.lines) {
+    const value = line ?? "";
+    signature += `:${value.length}:${value}`;
+  }
+  return signature;
 }
 
 export function buildFixedClusterPaint(
@@ -309,18 +350,7 @@ export function buildFixedClusterPaint(
     buffer += sanitizeLine(cluster.lines[i] ?? "", width);
   }
 
-  if (cluster.cursor) {
-    // Keep the real terminal cursor parked at the logical editor cursor even
-    // when it is visually hidden. macOS IME candidate windows anchor to the
-    // terminal cursor position, so skipping the move when PI_HARDWARE_CURSOR is
-    // off leaves the candidate window at a stale/offset location.
-    buffer += moveCursor(startRow + cluster.cursor.row, Math.max(1, cluster.cursor.col + 1));
-    buffer += showHardwareCursor ? showCursor() : hideCursor();
-  } else {
-    buffer += hideCursor();
-  }
-
-  return buffer;
+  return appendFixedClusterCursorPark(buffer, cluster, terminalRows, showHardwareCursor);
 }
 
 export class TerminalSplitCompositor {
@@ -348,6 +378,7 @@ export class TerminalSplitCompositor {
   private writing = false;
   private renderPassActive = false;
   private renderPassCluster: RenderPassCluster | null = null;
+  private lastFixedClusterPaint: FixedClusterPaintCache | null = null;
   private renderingCluster = false;
   private renderingScrollableRoot = false;
   private checkingOverlay = false;
@@ -540,10 +571,13 @@ export class TerminalSplitCompositor {
     const cluster = this.getCluster(width, rawRows);
     if (cluster.lines.length === 0) return;
 
+    const decoratedCluster = this.decorateCluster(cluster);
+    const showHardwareCursor = this.getShowHardwareCursor();
+    this.markFixedClusterPaint(decoratedCluster, rawRows, width, showHardwareCursor);
     this.originalWrite(
       beginSynchronizedOutput()
       + disableAutoWrap()
-      + buildFixedClusterPaint(this.decorateCluster(cluster), rawRows, width, this.getShowHardwareCursor())
+      + buildFixedClusterPaint(decoratedCluster, rawRows, width, showHardwareCursor)
       + enableAutoWrap()
       + this.mouseReportingStateGuard()
       + endSynchronizedOutput(),
@@ -650,7 +684,7 @@ export class TerminalSplitCompositor {
     try {
       const start = this.refreshRootWindow(width);
       return this.visibleRootLines.map((line, index) => {
-        return this.renderSelectionHighlight(line, start + index, "root");
+        return sanitizeLine(this.renderSelectionHighlight(line, start + index, "root"), Math.max(1, width));
       });
     } finally {
       this.renderingScrollableRoot = false;
@@ -664,7 +698,7 @@ export class TerminalSplitCompositor {
     const renderWidth = Math.max(1, width);
     const cluster = this.getCluster(renderWidth, rawRows);
     const scrollableRows = Math.max(1, rawRows - cluster.lines.length);
-    const lines = this.originalRender(renderWidth);
+    const lines = this.originalRender(renderWidth).map(sanitizeDisplayLine);
     this.rootLines = lines;
     if (this.scrollOffset > 0 && this.lastRootLineCount > 0 && lines.length > this.lastRootLineCount) {
       this.scrollOffset += lines.length - this.lastRootLineCount;
@@ -971,7 +1005,10 @@ export class TerminalSplitCompositor {
       buffer += sanitizeLine(this.renderSelectionHighlight(this.visibleRootLines[row] ?? "", start + row, "root"), width);
     }
 
-    buffer += buildFixedClusterPaint(this.decorateCluster(cluster), rawRows, width, this.getShowHardwareCursor());
+    const decoratedCluster = this.decorateCluster(cluster);
+    const showHardwareCursor = this.getShowHardwareCursor();
+    this.markFixedClusterPaint(decoratedCluster, rawRows, width, showHardwareCursor);
+    buffer += buildFixedClusterPaint(decoratedCluster, rawRows, width, showHardwareCursor);
     buffer += enableAutoWrap();
     buffer += this.mouseReportingStateGuard();
     buffer += endSynchronizedOutput();
@@ -1044,6 +1081,46 @@ export class TerminalSplitCompositor {
     return this.extendedKeyboardMode ? enableExtendedKeyboardMode(this.extendedKeyboardMode) : "";
   }
 
+  private markFixedClusterPaint(
+    cluster: FixedEditorClusterRender,
+    terminalRows: number,
+    width: number,
+    showHardwareCursor: boolean,
+  ): void {
+    this.lastFixedClusterPaint = {
+      width,
+      terminalRows,
+      showHardwareCursor,
+      signature: fixedClusterSignature(cluster),
+    };
+  }
+
+  private buildFixedClusterPaintIfChanged(
+    cluster: FixedEditorClusterRender,
+    terminalRows: number,
+    width: number,
+    showHardwareCursor: boolean,
+  ): string {
+    if (cluster.lines.length === 0) return "";
+
+    const signature = fixedClusterSignature(cluster);
+    if (
+      this.lastFixedClusterPaint
+      && this.lastFixedClusterPaint.width === width
+      && this.lastFixedClusterPaint.terminalRows === terminalRows
+      && this.lastFixedClusterPaint.showHardwareCursor === showHardwareCursor
+      && this.lastFixedClusterPaint.signature === signature
+    ) {
+      // Scroll-region protected writes cannot damage the fixed rows. If the
+      // cluster is byte-for-byte unchanged, only restore the scroll region and
+      // park the hardware cursor instead of repainting every fixed row again.
+      return appendFixedClusterCursorPark(resetScrollRegion(), cluster, terminalRows, showHardwareCursor);
+    }
+
+    this.lastFixedClusterPaint = { width, terminalRows, showHardwareCursor, signature };
+    return buildFixedClusterPaint(cluster, terminalRows, width, showHardwareCursor);
+  }
+
   private restoreTerminalState(options: DisposeOptions = {}): void {
     const activeMode = this.extendedKeyboardMode ?? this.activeExtendedKeyboardMode();
     const restoreMainScreenMode = !options.resetExtendedKeyboardModes && this.extendedKeyboardMode === null && activeMode !== null;
@@ -1095,13 +1172,15 @@ export class TerminalSplitCompositor {
           : 0;
       const viewportTop = typeof this.tui.previousViewportTop === "number" ? this.tui.previousViewportTop : 0;
       const screenRow = Math.max(1, Math.min(scrollBottom, hardwareCursorRow - viewportTop + 1));
+      const decoratedCluster = this.decorateCluster(cluster);
+      const showHardwareCursor = this.getShowHardwareCursor();
       const buffer = beginSynchronizedOutput()
         + this.consumePendingImageCleanup()
         + disableAutoWrap()
         + setScrollRegion(1, scrollBottom)
         + moveCursor(screenRow, 1)
         + data
-        + buildFixedClusterPaint(this.decorateCluster(cluster), rawRows, width, this.getShowHardwareCursor())
+        + this.buildFixedClusterPaintIfChanged(decoratedCluster, rawRows, width, showHardwareCursor)
         + enableAutoWrap()
         + this.mouseReportingStateGuard()
         + endSynchronizedOutput();

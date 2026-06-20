@@ -22,11 +22,11 @@ Customizes the default [pi](https://github.com/badlogic/pi-mono) editor with a p
 
 **Live thinking level indicator** — Shows current thinking level (`think:off`, `think:med`, etc.) with per-level colors. High and xhigh levels use a rainbow effect inspired by Claude Code's ultrathink.
 
-**Smart defaults** — Nerd Font auto-detection for iTerm, WezTerm, Kitty, Ghostty, and Alacritty with ASCII fallbacks. Colors matched to oh-my-pi's dark theme.
+**Smart defaults** — Nerd Font glyphs default on with documented config/env ASCII fallbacks. Colors matched to oh-my-pi's dark theme.
 
-**Git integration** — Async status fetching with 1s cache TTL. Automatically invalidates on file writes/edits. Shows branch, staged (+), unstaged (*), and untracked (?) counts.
+**Git integration** — Async status fetching with a short cache TTL and explicit invalidation on file writes/edits. Shows branch, staged (+), unstaged (*), and untracked (?) counts when full polling is enabled.
 
-**Context awareness** — Color-coded warnings at 70% (yellow) and 90% (red) context usage. The context percentage is shown as a whole number (for example, `17%/272k`). During streaming, the context segment refreshes from live assistant usage instead of waiting for the next turn. Auto-compact indicator when enabled. If `pi-custom-compaction` is installed and enabled, the powerline automatically hides native context segments so the footer does not show stale post-summary usage.
+**Context awareness** — Color-coded warnings above 70% (yellow) and above 90% (red) context usage. The context percentage is shown as a whole number (for example, `17%/272k`). During streaming, the context segment refreshes from live assistant usage instead of waiting for the next turn. Auto-compact indicator when enabled. If `pi-custom-compaction` is installed and enabled, the powerline automatically hides native context segments so the footer does not show stale post-summary usage.
 
 **Token intelligence** — Smart formatting (1.2k, 45M), subscription detection (shows "(sub)" vs dollar cost).
 
@@ -188,7 +188,7 @@ While bash mode is active:
 - `escape` exits bash mode and returns to normal prompt mode
 - `ctrl+c` interrupts the active shell job before falling back to normal pi behavior
 
-The managed shell is persistent for the current pi session. Command output appears in a transcript below the editor, and shell cwd changes are reflected in the footer path and `shell_mode` segment. If the bash prompt is empty, bash mode shows the newest successful project-history ghost suggestion immediately when one exists, including right after mode entry or after the prompt is cleared again. One-off `!command` and `!!command` prompts reuse the same shell prediction pipeline, including ghost text. Mode entry stays quiet: there is no automatic or manual dropdown completion surface, and ghost suggestions do not run shell-native completion probes.
+The managed shell is persistent for the current pi session. Command output appears in a transcript below the editor, and shell cwd changes are reflected in the footer path and `shell_mode` segment. If the bash prompt is empty, bash mode shows the newest successful project-history ghost suggestion immediately when one exists, including right after mode entry or after the prompt is cleared again. Obvious credential-bearing commands are skipped when storing or suggesting shell history. One-off `!command` and `!!command` prompts reuse the same shell prediction pipeline, including ghost text. Mode entry stays quiet: there is no automatic or manual dropdown completion surface, and ghost suggestions do not run shell-native completion probes.
 
 ### Bash mode configuration
 
@@ -203,6 +203,8 @@ In `~/.pi/agent/settings.json`:
   }
 }
 ```
+
+Transcript limits are clamped to at most 10,000 lines and 2 MiB.
 
 ## Editor Stash
 
@@ -298,15 +300,17 @@ In `~/.pi/agent/settings.json`:
 
 ```json
 {
-  "workingVibe": "star trek",                              // Theme phrase
-  "workingVibeMode": "generate",                           // "generate" (on-demand) or "file" (pre-generated)
-  "workingVibeModel": "openai-codex/gpt-5.4-mini",         // Optional: model to use (default)
-  "workingVibeFallback": "Working",                        // Optional: fallback message
-  "workingVibeRefreshInterval": 30,                        // Optional: seconds between refreshes (default 30)
-  "workingVibePrompt": "Generate a {theme} loading message for: {task}",  // Optional: custom prompt template
-  "workingVibeMaxLength": 65                         // Optional: max message length (default 65)
+  "workingVibe": "star trek",
+  "workingVibeMode": "generate",
+  "workingVibeModel": "openai-codex/gpt-5.4-mini",
+  "workingVibeFallback": "Working",
+  "workingVibeRefreshInterval": 30,
+  "workingVibePrompt": "Generate a {theme} loading message for: {task}",
+  "workingVibeMaxLength": 65
 }
 ```
+
+All fields except `workingVibe` are optional.
 
 ### Modes
 
@@ -323,7 +327,7 @@ In `~/.pi/agent/settings.json`:
 ```
 
 **How file mode works:**
-1. Vibes are loaded from `~/.pi/agent/vibes/{theme}.txt` into memory
+1. Vibes are loaded from `~/.pi/agent/vibes/{theme-slug}.txt` into memory (ASCII themes use the obvious slug, e.g. `mafia.txt`; non-ASCII/punctuation-only themes get a short hash suffix to avoid collisions)
 2. Uses seeded shuffle (Mulberry32 PRNG) — cycles through all vibes before repeating
 3. New seed each session — different order every time you restart pi
 4. Zero latency, zero cost, works offline
@@ -339,6 +343,8 @@ In `~/.pi/agent/settings.json`:
 3. Message updates to the themed version (e.g., "Engaging warp drive...")
 4. During long tasks, refreshes on tool calls (rate-limited, default 30s)
 5. Cost and latency depend on your configured `workingVibeModel`
+
+**Privacy note:** generate mode sends a short task hint to the configured model (the initial user prompt, then recent agent/tool context for refreshes). Obvious secret patterns such as `TOKEN=...`, `Authorization: ...`, passwords, and API keys are redacted before prompting, but avoid generate mode for sensitive workflows if no prompt context should leave your machine; use `file` mode instead.
 
 ## Thinking Level Display
 
@@ -369,7 +375,7 @@ Configure via preset options: `path: { mode: "full" }`
 
 ## Git polling
 
-By default the git segment polls both branch and dirty state. If background `git status --porcelain` calls interfere with your workflow, use branch-only polling:
+By default, presets that display dirty counts poll both branch and dirty state, using a 5s dirty-state cache plus explicit invalidation after writes, edits, and shell commands. Presets that only display the branch use branch-only polling. If background `git status --porcelain` calls interfere with your workflow, force branch-only polling:
 
 ```json
 {

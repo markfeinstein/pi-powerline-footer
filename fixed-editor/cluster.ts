@@ -53,7 +53,12 @@ export function keepSpinnerGlyph(statusLine: string): string {
 export function reserveSpinnerSlot(barLine: string, spinnerGlyph: string): string {
   const glyph = keepSpinnerGlyph(spinnerGlyph) || spinnerGlyph.trim();
   const cell = glyph ? glyph : " ";
-  return ` ${cell} ${barLine.replace(/^\s+/, "")}`;
+  // Powerline bar lines always start with a single leading space; the 3-column
+  // slot replaces exactly that one space for a net +2 columns (SPINNER_SLOT_RESERVE).
+  // Only strip a single leading space (not /^\s+/): a right-aligned bar with an
+  // empty left group begins with alignment padding, and consuming all of it would
+  // collapse the right segments against the spinner instead of the terminal edge.
+  return ` ${cell} ${barLine.replace(/^ /, "")}`;
 }
 
 /**

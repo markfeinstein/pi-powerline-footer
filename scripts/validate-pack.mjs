@@ -32,6 +32,7 @@ const expectedFiles = [
   "presets.ts",
   "project-key.ts",
   "render-scheduler.ts",
+  "sanitize.ts",
   "segments.ts",
   "separators.ts",
   "shortcuts.ts",

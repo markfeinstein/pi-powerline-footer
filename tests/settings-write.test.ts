@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import powerlineFooter, { getPromptHistoryText, readRecentProjectPrompts, writePowerlineSetting } from "../index.ts";
@@ -54,6 +54,9 @@ test("writePowerlineSetting persists atomically, leaving no temp files behind", 
 
     const leftoverTempFiles = readdirSync(agentDir).filter((name) => name.endsWith(".tmp"));
     assert.deepEqual(leftoverTempFiles, [], "no temp files should remain after an atomic write");
+    if (process.platform !== "win32") {
+      assert.equal(statSync(globalSettingsPath).mode & 0o777, 0o600, "settings writes should force private file permissions");
+    }
   } finally {
     process.env.HOME = originalHome;
   }
@@ -179,6 +182,96 @@ test("powerlineFooter reads symlinked global settings on startup", () => {
   try {
     assert.equal(shortcuts.has("ctrl+alt+d"), true);
     assert.equal(shortcuts.has("ctrl+alt+c"), false);
+  } finally {
+    process.env.HOME = originalHome;
+  }
+});
+
+test("powerlineFooter ignores symlinked project settings on startup", () => {
+  const originalHome = process.env.HOME;
+  const originalCwd = process.cwd();
+  const homeDir = mkTempDir();
+  const cwd = mkTempDir();
+  const targetPath = join(homeDir, "target-project-settings.json");
+  const projectSettingsPath = join(cwd, ".pi", "settings.json");
+  const shortcuts = new Map<string, (ctx: any) => unknown>();
+
+  process.env.HOME = homeDir;
+  mkdirSync(join(homeDir, ".pi", "agent"), { recursive: true });
+  mkdirSync(join(cwd, ".pi"), { recursive: true });
+  writeFileSync(targetPath, JSON.stringify({ powerlineShortcuts: { copyEditor: "ctrl+alt+d" } }, null, 2) + "\n");
+  symlinkSync(targetPath, projectSettingsPath);
+  process.chdir(cwd);
+
+  powerlineFooter({
+    on() {},
+    registerCommand() {},
+    registerShortcut(key: string, shortcut: { handler: (ctx: any) => unknown }) {
+      shortcuts.set(key, shortcut.handler);
+    },
+  } as any);
+
+  try {
+    assert.equal(shortcuts.has("ctrl+alt+d"), false);
+    assert.equal(shortcuts.has("ctrl+alt+c"), true);
+  } finally {
+    process.chdir(originalCwd);
+    process.env.HOME = originalHome;
+  }
+});
+
+test("powerlineFooter registers session-specific shortcut overrides", async () => {
+  const originalHome = process.env.HOME;
+  const homeDir = mkTempDir();
+  const cwd = mkTempDir();
+  const projectSettingsPath = join(cwd, ".pi", "settings.json");
+  const handlers = new Map<string, Array<(event: any, ctx: any) => unknown>>();
+  const shortcuts = new Map<string, { description?: string; handler: (ctx: any) => unknown }>();
+
+  process.env.HOME = homeDir;
+  mkdirSync(join(homeDir, ".pi", "agent"), { recursive: true });
+  mkdirSync(join(cwd, ".pi"), { recursive: true });
+  writeFileSync(projectSettingsPath, JSON.stringify({ powerlineShortcuts: { copyEditor: "ctrl+alt+d" } }, null, 2) + "\n");
+
+  powerlineFooter({
+    on(event: string, handler: (event: any, ctx: any) => unknown) {
+      handlers.set(event, [...(handlers.get(event) ?? []), handler]);
+    },
+    registerCommand() {},
+    registerShortcut(key: string, shortcut: { description?: string; handler: (ctx: any) => unknown }) {
+      shortcuts.set(key, shortcut);
+    },
+  } as any);
+
+  try {
+    assert.equal(shortcuts.has("ctrl+alt+d"), false);
+    await handlers.get("session_start")?.[0]?.({ reason: "resume" }, { cwd, hasUI: false });
+    assert.equal(shortcuts.has("ctrl+alt+d"), true);
+  } finally {
+    process.env.HOME = originalHome;
+  }
+});
+
+test("bash mode shortcut wins over conflicting powerline shortcut", () => {
+  const originalHome = process.env.HOME;
+  const homeDir = mkTempDir();
+  const globalSettingsPath = join(homeDir, ".pi", "agent", "settings.json");
+  const shortcuts = new Map<string, { description?: string; handler: (ctx: any) => unknown }>();
+
+  process.env.HOME = homeDir;
+  mkdirSync(join(homeDir, ".pi", "agent"), { recursive: true });
+  writeFileSync(globalSettingsPath, JSON.stringify({ bashMode: { toggleShortcut: "ctrl+alt+c" } }, null, 2) + "\n");
+
+  powerlineFooter({
+    on() {},
+    registerCommand() {},
+    registerShortcut(key: string, shortcut: { description?: string; handler: (ctx: any) => unknown }) {
+      shortcuts.set(key, shortcut);
+    },
+  } as any);
+
+  try {
+    assert.equal(shortcuts.get("ctrl+alt+c")?.description, "Toggle bash mode");
   } finally {
     process.env.HOME = originalHome;
   }
@@ -472,6 +565,38 @@ test("readRecentProjectPrompts applies file cap by newest session files", () => 
   }
 });
 
+test("readRecentProjectPrompts stops after total byte cap", () => {
+  const originalHome = process.env.HOME;
+  const cwd = mkTempDir();
+  const homeDir = mkTempDir();
+  const legacyProjectKey = cwd.replace(/^[/\\]+|[/\\]+$/g, "").replace(/[\\/]+/g, "-");
+  const legacySessionsPath = join(homeDir, ".pi", "agent", "sessions", `--${legacyProjectKey}--`);
+
+  process.env.HOME = homeDir;
+  mkdirSync(legacySessionsPath, { recursive: true });
+  const oldPath = join(legacySessionsPath, "old-readable.jsonl");
+  writeFileSync(oldPath, JSON.stringify({
+    type: "message",
+    message: { role: "user", content: "old prompt", timestamp: 1 },
+  }) + "\n");
+  const oldDate = new Date(Date.now() - 10_000);
+  utimesSync(oldPath, oldDate, oldDate);
+
+  const largeContent = JSON.stringify({ type: "noop", pad: "x".repeat(2 * 1024 * 1024 - 128) }) + "\n";
+  for (let i = 0; i < 9; i++) {
+    const filePath = join(legacySessionsPath, `new-large-${i}.jsonl`);
+    writeFileSync(filePath, largeContent);
+    const future = new Date(Date.now() + 10_000 + i * 1000);
+    utimesSync(filePath, future, future);
+  }
+
+  try {
+    assert.deepEqual(readRecentProjectPrompts(cwd, 10), []);
+  } finally {
+    process.env.HOME = originalHome;
+  }
+});
+
 test("readRecentProjectPrompts skips symlinked session files and directories", () => {
   const originalHome = process.env.HOME;
   const cwd = mkTempDir();
@@ -491,6 +616,49 @@ test("readRecentProjectPrompts skips symlinked session files and directories", (
   try {
     assert.deepEqual(readRecentProjectPrompts(cwd, 10), []);
   } finally {
+    process.env.HOME = originalHome;
+  }
+});
+
+test("stash history persists with private file permissions", async () => {
+  const originalHome = process.env.HOME;
+  const originalUmask = process.umask(0);
+  const cwd = mkTempDir();
+  const homeDir = mkTempDir();
+  const stashPath = join(homeDir, ".pi", "agent", "powerline-footer", "stash-history.json");
+  const shortcuts = new Map<string, (ctx: any) => unknown>();
+
+  process.env.HOME = homeDir;
+  mkdirSync(join(homeDir, ".pi", "agent"), { recursive: true });
+
+  powerlineFooter({
+    on() {},
+    registerCommand() {},
+    registerShortcut(key: string, shortcut: { handler: (ctx: any) => unknown }) {
+      shortcuts.set(key, shortcut.handler);
+    },
+  } as any);
+
+  try {
+    const stashShortcut = shortcuts.get("alt+s");
+    assert.ok(stashShortcut);
+
+    await stashShortcut({
+      hasUI: true,
+      cwd,
+      ui: {
+        getEditorText: () => "secret draft",
+        setEditorText() {},
+        setStatus() {},
+        notify() {},
+      },
+    });
+
+    if (process.platform !== "win32") {
+      assert.equal(statSync(stashPath).mode & 0o777, 0o600);
+    }
+  } finally {
+    process.umask(originalUmask);
     process.env.HOME = originalHome;
   }
 });
@@ -533,6 +701,47 @@ test("stash history refuses symlinked persistence files", async () => {
     });
 
     assert.equal(readFileSync(targetPath, "utf-8"), "keep\n");
+  } finally {
+    process.env.HOME = originalHome;
+  }
+});
+
+test("stash history ignores oversized persistence files", async () => {
+  const originalHome = process.env.HOME;
+  const cwd = mkTempDir();
+  const homeDir = mkTempDir();
+  const stashDir = join(homeDir, ".pi", "agent", "powerline-footer");
+  const stashPath = join(stashDir, "stash-history.json");
+  const commands = new Map<string, (args: string, ctx: any) => unknown>();
+  const notifications: string[] = [];
+
+  process.env.HOME = homeDir;
+  mkdirSync(stashDir, { recursive: true });
+  writeFileSync(stashPath, JSON.stringify({ history: ["hidden prompt".repeat(30000)] }) + "\n");
+
+  powerlineFooter({
+    on() {},
+    registerShortcut() {},
+    registerCommand(name: string, command: { handler: (args: string, ctx: any) => unknown }) {
+      commands.set(name, command.handler);
+    },
+  } as any);
+
+  try {
+    const handler = commands.get("stash-history");
+    assert.ok(handler);
+
+    await handler("", {
+      hasUI: true,
+      cwd,
+      ui: {
+        notify(message: string) {
+          notifications.push(message);
+        },
+      },
+    });
+
+    assert.deepEqual(notifications, ["No prompt history yet"]);
   } finally {
     process.env.HOME = originalHome;
   }
@@ -587,6 +796,60 @@ test("readRecentProjectPrompts skips unreadable session files without throwing",
     assert.deepEqual(readRecentProjectPrompts(cwd, 10), ["readable prompt"]);
   } finally {
     chmodSync(unreadablePath, 0o600);
+    process.env.HOME = originalHome;
+  }
+});
+
+test("a shortcut remapped across sessions still routes its old key instead of dead-swallowing", async () => {
+  // The host has no unregisterShortcut API and swallows any matched key, so a key
+  // that a later session reload remaps away must keep routing to its last action
+  // rather than becoming a dead key that silently eats input.
+  const originalHome = process.env.HOME;
+  const home = mkTempDir();
+  const cwdA = mkTempDir();
+  const cwdB = mkTempDir();
+
+  process.env.HOME = home;
+  mkdirSync(join(home, ".pi", "agent"), { recursive: true });
+  mkdirSync(join(cwdA, ".pi"), { recursive: true });
+  mkdirSync(join(cwdB, ".pi"), { recursive: true });
+  writeFileSync(join(cwdA, ".pi", "settings.json"), JSON.stringify({ powerlineShortcuts: { copyEditor: "ctrl+alt+d" } }) + "\n");
+  writeFileSync(join(cwdB, ".pi", "settings.json"), JSON.stringify({ powerlineShortcuts: { copyEditor: "ctrl+alt+e" } }) + "\n");
+
+  const handlers = new Map<string, Array<(event: any, ctx: any) => unknown>>();
+  // Mimic the host registry: keyed by shortcut string, retains every key ever
+  // registered (the real host never removes them).
+  const shortcuts = new Map<string, { handler: (ctx: any) => unknown }>();
+
+  powerlineFooter({
+    on(event: string, handler: (event: any, ctx: any) => unknown) {
+      handlers.set(event, [...(handlers.get(event) ?? []), handler]);
+    },
+    registerCommand() {},
+    registerShortcut(key: string, shortcut: { handler: (ctx: any) => unknown }) {
+      shortcuts.set(key, shortcut);
+    },
+  } as any);
+
+  try {
+    await handlers.get("session_start")?.[0]?.({ reason: "resume" }, { cwd: cwdA, hasUI: false });
+    assert.equal(shortcuts.has("ctrl+alt+d"), true);
+
+    // Reload into project B: copyEditor moves to ctrl+alt+e, abandoning ctrl+alt+d.
+    await handlers.get("session_start")?.[0]?.({ reason: "resume" }, { cwd: cwdB, hasUI: false });
+    assert.equal(shortcuts.has("ctrl+alt+e"), true);
+    assert.equal(shortcuts.has("ctrl+alt+d"), true);
+
+    // Invoking the abandoned key must still route to copyEditor (observable via
+    // the "Editor is empty" notice on an empty editor), not no-op.
+    const notices: Array<[string, string]> = [];
+    const ctx = {
+      hasUI: true,
+      ui: { getEditorText: () => "", notify: (m: string, level: string) => notices.push([m, level]) },
+    };
+    await shortcuts.get("ctrl+alt+d")?.handler?.(ctx as any);
+    assert.deepEqual(notices, [["Editor is empty", "info"]]);
+  } finally {
     process.env.HOME = originalHome;
   }
 });

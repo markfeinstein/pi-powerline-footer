@@ -7,6 +7,8 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { existsSync, lstatSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync, mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { homedir } from "node:os";
+import { createHash } from "node:crypto";
+import { stripTerminalControlSequences } from "./powerline-config.ts";
 
 type VibeMode = "generate" | "file";
 
@@ -15,6 +17,7 @@ type VibeMode = "generate" | "file";
 // ═══════════════════════════════════════════════════════════════════════════
 
 const DEFAULT_MODEL = "openai-codex/gpt-5.4-mini";
+const MAX_VIBE_FILE_BYTES = 128 * 1024;
 
 const DEFAULT_PROMPT = `Generate a 2-4 word "{theme}" themed loading message ending in "...".
 
@@ -62,12 +65,15 @@ interface VibeGenContext {
 const MAX_SETTINGS_FILE_BYTES = 256 * 1024;
 const DEFAULT_VIBE_BATCH_COUNT = 100;
 const MAX_VIBE_BATCH_COUNT = 500;
+const MIN_WORKING_VIBE_REFRESH_INTERVAL_MS = 5_000;
 
 let config: VibeConfig = loadConfig();
 let extensionCtx: ExtensionContext | null = null;
 let currentGeneration: AbortController | null = null;
 let isStreaming = false;
 let lastVibeTime = 0;
+let lastWorkingMessage: string | undefined;
+let pendingGeneratedVibe: string | null = null;
 
 // File-based mode state
 let vibeCache: string[] = [];        // Cached vibes from file
@@ -95,6 +101,22 @@ function getSettingsPath(): string {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function sanitizeVibeText(value: string): string {
+  return stripTerminalControlSequences(value).replace(/[\r\n\t]/g, " ").trim();
+}
+
+function sanitizeVibeModelSpec(value: unknown): string {
+  if (typeof value !== "string") return DEFAULT_MODEL;
+  return sanitizeVibeText(value) || DEFAULT_MODEL;
+}
+
+function redactVibeContextText(value: string): string {
+  return value
+    .replace(/\b(authorization\s*[:=]\s*)[^\r\n,;]+/gi, "$1[redacted]")
+    .replace(/\b([A-Z0-9_]*(?:TOKEN|SECRET|PASSWORD|PASS|API[_-]?KEY|ACCESS[_-]?KEY|PRIVATE[_-]?KEY)[A-Z0-9_-]*\s*=\s*)(?:"[^"]*"|'[^']*'|[^\s,;&]+)/gi, "$1[redacted]")
+    .replace(/(["']?(?:token|secret|password|api[_-]?key|authorization)["']?\s*:\s*)(?:"[^"]*"|'[^']*'|[^\s,;}]+)/gi, "$1[redacted]");
 }
 
 function readSettingsForLoad(): Record<string, unknown> {
@@ -181,12 +203,16 @@ function persistSettings(settings: Record<string, unknown>, scope: string): bool
 // symlink swapped in after validation cannot redirect the write to an
 // arbitrary target (rename replaces the symlink itself rather than following
 // it). Mirrors the hardening used in index.ts writePowerlineSetting().
-function atomicWriteFile(targetPath: string, contents: string, scope: string): boolean {
+function atomicWriteFile(targetPath: string, contents: string, scope: string, validatePath: (filePath: string) => boolean = canWriteWithinAgentPath): boolean {
   let tempPath = "";
   try {
     mkdirSync(dirname(targetPath), { recursive: true });
+    if (!validatePath(targetPath)) {
+      console.debug(`[working-vibes] Refusing to write ${scope} through unsafe path at ${targetPath}`);
+      return false;
+    }
     tempPath = `${targetPath}.${process.pid}.${Date.now()}.tmp`;
-    writeFileSync(tempPath, contents, { flag: "wx" });
+    writeFileSync(tempPath, contents, { flag: "wx", mode: 0o600 });
     try {
       if (lstatSync(targetPath).isSymbolicLink()) {
         console.debug(`[working-vibes] Refusing to replace symlinked path while writing ${scope} at ${targetPath}`);
@@ -251,7 +277,7 @@ function canWriteWithinAgentPath(filePath: string): boolean {
   if (targetDir === agentDir) return true;
 
   const vibesDir = join(agentDir, "vibes");
-  return targetDir === vibesDir;
+  return targetDir === vibesDir && isSafeWritableDirectoryPath(vibesDir);
 }
 
 function canWriteRegularFilePath(filePath: string): boolean {
@@ -267,7 +293,7 @@ function loadConfig(): VibeConfig {
   const settings = readSettingsForLoad();
 
   // Handle "off" in settings.json (same as null/disabled)
-  const rawTheme = typeof settings.workingVibe === "string" ? settings.workingVibe : null;
+  const rawTheme = typeof settings.workingVibe === "string" ? sanitizeVibeText(settings.workingVibe) : null;
   const theme = rawTheme?.toLowerCase() === "off" ? null : rawTheme;
 
   // Validate mode setting
@@ -276,7 +302,7 @@ function loadConfig(): VibeConfig {
 
   const refreshSeconds =
     typeof settings.workingVibeRefreshInterval === "number" && Number.isFinite(settings.workingVibeRefreshInterval)
-      ? Math.max(0, settings.workingVibeRefreshInterval)
+      ? Math.max(MIN_WORKING_VIBE_REFRESH_INTERVAL_MS / 1000, settings.workingVibeRefreshInterval)
       : 30;
 
   const maxLength =
@@ -287,8 +313,8 @@ function loadConfig(): VibeConfig {
   return {
     theme,
     mode,
-    modelSpec: typeof settings.workingVibeModel === "string" ? settings.workingVibeModel : DEFAULT_MODEL,
-    fallback: typeof settings.workingVibeFallback === "string" ? settings.workingVibeFallback : "Working",
+    modelSpec: sanitizeVibeModelSpec(settings.workingVibeModel),
+    fallback: typeof settings.workingVibeFallback === "string" ? sanitizeVibeText(settings.workingVibeFallback) || "Working" : "Working",
     timeout: 3000,
     refreshInterval: refreshSeconds * 1000,
     promptTemplate: typeof settings.workingVibePrompt === "string" ? settings.workingVibePrompt : DEFAULT_PROMPT,
@@ -342,8 +368,8 @@ export function parseVibeGenerateArgs(args: readonly string[]): ParsedVibeGenera
   if (tokens.length === 0) return null;
 
   const lastToken = tokens[tokens.length - 1] ?? "";
-  const parsedCount = Number.parseInt(lastToken, 10);
-  const hasExplicitCount = tokens.length > 1 && Number.isFinite(parsedCount);
+  const hasExplicitCount = tokens.length > 1 && /^\d+$/.test(lastToken);
+  const parsedCount = hasExplicitCount ? Number.parseInt(lastToken, 10) : DEFAULT_VIBE_BATCH_COUNT;
   const theme = (hasExplicitCount ? tokens.slice(0, -1) : tokens).join(" ").trim();
   if (!theme) return null;
 
@@ -363,14 +389,18 @@ function getVibesDir(): string {
 }
 
 function toVibeFileSlug(theme: string): string {
-  const slug = theme
-    .trim()
-    .toLowerCase()
+  const normalizedTheme = theme.trim().toLowerCase();
+  const slug = normalizedTheme
     .replace(/[^a-z0-9_-]+/g, "-")
     .replace(/-+/g, "-")
     .replace(/^[-_]+|[-_]+$/g, "");
 
-  return slug || "theme";
+  if (slug && !/[^\x00-\x7f]/.test(normalizedTheme)) {
+    return slug;
+  }
+
+  const hash = createHash("sha256").update(normalizedTheme || theme).digest("hex").slice(0, 8);
+  return `${slug || "theme"}-${hash}`;
 }
 
 function getVibeFilePath(theme: string): string {
@@ -382,14 +412,18 @@ function loadVibesFromFile(theme: string): string[] {
   const filePath = getVibeFilePath(theme);
 
   try {
-    if (!canWriteWithinAgentPath(filePath) || !lstatSync(filePath).isFile()) return [];
+    if (!canWriteWithinAgentPath(filePath)) return [];
+    const stats = lstatSync(filePath);
+    if (!stats.isFile() || stats.size > MAX_VIBE_FILE_BYTES) return [];
     const content = readFileSync(filePath, "utf-8");
     return content
       .split("\n")
-      .map(line => line.trim())
+      .map((line) => sanitizeVibeText(line))
       .filter(line => line.length > 0 && line.endsWith("..."));
   } catch (error) {
-    console.debug(`[working-vibes] Failed to load vibe file ${filePath}:`, error);
+    if (!isFileNotFoundError(error)) {
+      console.debug(`[working-vibes] Failed to load vibe file ${filePath}:`, error);
+    }
     return [];
   }
 }
@@ -466,7 +500,7 @@ function getNextVibeFromFile(): string {
 
 function buildVibePrompt(ctx: VibeGenContext): string {
   // Truncate user prompt to save tokens (most context in first 100 chars)
-  const task = ctx.userPrompt.slice(0, 100);
+  const task = redactVibeContextText(ctx.userPrompt).slice(0, 100);
   
   // Build exclusion list from recent vibes
   const exclude = recentVibes.length > 0 
@@ -480,14 +514,19 @@ function buildVibePrompt(ctx: VibeGenContext): string {
     .replace(/\{exclude\}/g, exclude);
 }
 
+function truncateVibeText(vibe: string, maxLength: number): string {
+  if (vibe.length <= maxLength) return vibe;
+  return Array.from(vibe).slice(0, Math.max(0, maxLength - 3)).join("") + "...";
+}
+
 function parseVibeResponse(response: string, fallback: string): string {
   if (!response) return `${fallback}...`;
   
   // Take only the first line (AI sometimes adds explanations)
-  let vibe = response.trim().split('\n')[0].trim();
+  let vibe = sanitizeVibeText(response.trim().split('\n')[0] ?? "");
   
   // Remove quotes if model wrapped the response
-  vibe = vibe.replace(/^["']|["']$/g, "");
+  vibe = sanitizeVibeText(vibe.replace(/^["']|["']$/g, ""));
   
   // Ensure ellipsis
   if (!vibe.endsWith("...")) {
@@ -496,7 +535,7 @@ function parseVibeResponse(response: string, fallback: string): string {
   
   // Enforce length limit (configurable, default 65 chars)
   if (vibe.length > config.maxLength) {
-    vibe = vibe.slice(0, config.maxLength - 3) + "...";
+    vibe = truncateVibeText(vibe, config.maxLength);
   }
   
   // Final validation
@@ -574,8 +613,19 @@ function trackRecentVibe(vibe: string): void {
   recentVibes = [vibe, ...recentVibes.filter(v => v !== vibe)].slice(0, MAX_RECENT_VIBES);
 }
 
+function setWorkingMessageIfChanged(setWorkingMessage: (msg?: string) => void, message: string | undefined): void {
+  if (lastWorkingMessage === message) return;
+  setWorkingMessage(message);
+  lastWorkingMessage = message;
+}
+
 function updateVibeFromFile(setWorkingMessage: (msg?: string) => void): void {
-  setWorkingMessage(getNextVibeFromFile());
+  setWorkingMessageIfChanged(setWorkingMessage, getNextVibeFromFile());
+}
+
+function applyGeneratedVibe(setWorkingMessage: (msg?: string) => void, vibe: string): void {
+  trackRecentVibe(vibe);
+  setWorkingMessageIfChanged(setWorkingMessage, vibe);
 }
 
 async function generateAndUpdate(
@@ -608,10 +658,15 @@ async function generateAndUpdate(
       combinedSignal,
     );
     
-    // Only update if still streaming and THIS generation wasn't aborted
-    if (isStreaming && !controller.signal.aborted) {
-      trackRecentVibe(vibe);
-      setWorkingMessage(vibe);
+    // Only update if THIS generation wasn't aborted. When before_agent_start
+    // generation wins the race against agent_start, keep the result for the
+    // loader instead of leaving the placeholder up for the whole turn.
+    if (!controller.signal.aborted) {
+      if (isStreaming) {
+        applyGeneratedVibe(setWorkingMessage, vibe);
+      } else {
+        pendingGeneratedVibe = vibe;
+      }
     }
   } catch (error) {
     // AbortError is expected on timeout/cancel - don't log as error
@@ -631,6 +686,16 @@ async function generateAndUpdate(
 export function initVibeManager(ctx: ExtensionContext): void {
   extensionCtx = ctx;
   config = loadConfig(); // Refresh config in case settings changed
+  currentGeneration?.abort();
+  currentGeneration = null;
+  isStreaming = false;
+  lastVibeTime = 0;
+  lastWorkingMessage = undefined;
+  pendingGeneratedVibe = null;
+  vibeCache = [];
+  vibeCacheTheme = null;
+  vibeSeed = Date.now();
+  vibeIndex = 0;
 }
 
 export function getVibeTheme(): string | null {
@@ -638,7 +703,7 @@ export function getVibeTheme(): string | null {
 }
 
 export function setVibeTheme(theme: string | null): boolean {
-  config = { ...config, theme };
+  config = { ...config, theme: theme === null ? null : sanitizeVibeText(theme) };
   recentVibes = [];  // Clear recent vibes on theme change
   return saveConfig();
 }
@@ -648,7 +713,7 @@ export function getVibeModel(): string {
 }
 
 export function setVibeModel(modelSpec: string): boolean {
-  config = { ...config, modelSpec };
+  config = { ...config, modelSpec: sanitizeVibeModelSpec(modelSpec) };
   return saveModelConfig();
 }
 
@@ -659,9 +724,9 @@ export function onVibeBeforeAgentStart(
   // Skip if no theme configured or no extensionCtx
   if (!config.theme || !extensionCtx) return;
   
-  // Queue themed placeholder BEFORE agent_start creates the loader
-  // This sets pendingWorkingMessage which is applied when loader is created
-  setWorkingMessage(`Channeling ${config.theme}...`);
+  // Queue themed placeholder BEFORE agent_start creates the loader.
+  setWorkingMessageIfChanged(setWorkingMessage, `Channeling ${config.theme}...`);
+  pendingGeneratedVibe = null;
   
   // Mark vibe generation time for rate limiting
   lastVibeTime = Date.now();
@@ -670,8 +735,13 @@ export function onVibeBeforeAgentStart(
   generateAndUpdate(prompt, setWorkingMessage);
 }
 
-export function onVibeAgentStart(): void {
+export function onVibeAgentStart(setWorkingMessage?: (msg?: string) => void): void {
   isStreaming = true;
+  if (pendingGeneratedVibe && setWorkingMessage) {
+    const vibe = pendingGeneratedVibe;
+    pendingGeneratedVibe = null;
+    applyGeneratedVibe(setWorkingMessage, vibe);
+  }
 }
 
 export function onVibeToolCall(
@@ -692,18 +762,18 @@ export function onVibeToolCall(
   let hint: string;
   if (agentContext && agentContext.length > 10) {
     // Use first ~150 chars of agent context
-    hint = agentContext.slice(0, 150);
+    hint = redactVibeContextText(agentContext).slice(0, 150);
   } else {
     // Build hint from tool name and input
     hint = `using ${toolName} tool`;
     if (toolName === "read" && toolInput.path) {
-      hint = `reading file: ${toolInput.path}`;
+      hint = `reading file: ${redactVibeContextText(String(toolInput.path))}`;
     } else if (toolName === "write" && toolInput.path) {
-      hint = `writing file: ${toolInput.path}`;
+      hint = `writing file: ${redactVibeContextText(String(toolInput.path))}`;
     } else if (toolName === "edit" && toolInput.path) {
-      hint = `editing file: ${toolInput.path}`;
+      hint = `editing file: ${redactVibeContextText(String(toolInput.path))}`;
     } else if (toolName === "bash" && toolInput.command) {
-      const cmd = String(toolInput.command).slice(0, 40);
+      const cmd = redactVibeContextText(String(toolInput.command)).slice(0, 40);
       hint = `running command: ${cmd}`;
     }
   }
@@ -717,8 +787,10 @@ export function onVibeAgentEnd(setWorkingMessage: (msg?: string) => void): void 
   isStreaming = false;
   // Cancel any in-flight generation
   currentGeneration?.abort();
-  // Reset to pi's default working message
-  setWorkingMessage(undefined);
+  currentGeneration = null;
+  pendingGeneratedVibe = null;
+  // Reset to pi's default working message.
+  setWorkingMessageIfChanged(setWorkingMessage, undefined);
 }
 
 export function getVibeMode(): VibeMode {
@@ -746,16 +818,7 @@ function saveModeConfig(): boolean {
 }
 
 export function hasVibeFile(theme: string): boolean {
-  const filePath = getVibeFilePath(theme);
-
-  try {
-    return canWriteWithinAgentPath(filePath) && lstatSync(filePath).isFile();
-  } catch (error) {
-    if (!isFileNotFoundError(error)) {
-      console.debug(`[working-vibes] Failed to check vibe file ${filePath}:`, error);
-    }
-    return false;
-  }
+  return loadVibesFromFile(theme).length > 0;
 }
 
 export function getVibeFileCount(theme: string): number {
@@ -828,8 +891,8 @@ export async function generateVibesBatch(
       .filter(line => line.length > 0)
       .map(line => {
         // Clean up each line
-        let vibe = line.replace(/^["'\d.\-)\s]+/, "").trim();  // Remove leading quotes, numbers, bullets
-        vibe = vibe.replace(/["']$/g, "");  // Remove trailing quotes
+        let vibe = sanitizeVibeText(line.replace(/^["'\d.\-)\s]+/, ""));  // Remove leading quotes, numbers, bullets
+        vibe = sanitizeVibeText(vibe.replace(/["']$/g, ""));  // Remove trailing quotes
         if (!vibe.endsWith("...")) {
           vibe = vibe.replace(/\.+$/, "") + "...";
         }

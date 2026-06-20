@@ -12,6 +12,10 @@ test("joinLeftRight returns the left content unchanged when there is no right gr
   assert.equal(joinLeftRight(" left ", "", 80), " left ");
 });
 
+test("joinLeftRight returns null when a left-only group is too wide", () => {
+  assert.equal(joinLeftRight("abcdefghij", "", 5), null);
+});
+
 test("joinLeftRight right-aligns the right group flush to availableWidth", () => {
   const out = joinLeftRight("ab", "yz", 10);
   assert.notEqual(out, null);

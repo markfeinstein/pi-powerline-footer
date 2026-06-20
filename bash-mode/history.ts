@@ -10,6 +10,7 @@ interface PersistedHistoryEntry {
 }
 
 const MAX_GLOBAL_HISTORY_BYTES = 1024 * 1024;
+const MAX_PROJECT_HISTORY_BYTES = 256 * 1024;
 const ZSH_HISTORY_FILENAMES = new Set([".zsh_history"]);
 const BASH_HISTORY_FILENAMES = new Set([".bash_history"]);
 const FISH_HISTORY_FILENAMES = new Set(["fish_history"]);
@@ -123,13 +124,31 @@ function readHistoryFingerprint(filePath: string): string {
   return `${filePath}:${stats.size}:${stats.mtimeMs}`;
 }
 
-function memoizeHistory<T>(cache: Map<string, CachedHistory<T>>, key: string, value: T): T {
-  cache.set(key, { key, value });
+function memoizeHistory<T>(cache: Map<string, CachedHistory<T>>, mapKey: string, entryKey: string, value: T): T {
+  // `mapKey` identifies the cache slot (e.g. the shell path); `entryKey` is the
+  // staleness fingerprint compared on lookup. These differ, so they must be
+  // stored separately — otherwise the lookup never matches and the cache is dead.
+  cache.set(mapKey, { key: entryKey, value });
   if (cache.size > HISTORY_CACHE_LIMIT) {
     const oldestKey = cache.keys().next().value as string | undefined;
     if (oldestKey) cache.delete(oldestKey);
   }
   return value;
+}
+
+const SECRET_COMMAND_PATTERNS = [
+  /\b[A-Z0-9_]*(?:TOKEN|SECRET|PASSWORD|API[_-]?KEY|ACCESS[_-]?KEY|PRIVATE[_-]?KEY)[A-Z0-9_-]*\s*=/i,
+  /\b(?:PASS|[A-Z0-9_]+_PASS)\s*=/i,
+  /(?:^|\s)--(?:password|token|secret|api[-_]?key|access[-_]?key|private[-_]?key)(?:=|\s+)\S+/i,
+  /(?:^|\s)(?:-u|--user)(?:=|\s+)\S+:\S+/i,
+  /\b(?:authorization|x-api-key)\s*:\s*\S+/i,
+  /\bBearer\s+[A-Za-z0-9._~+/=-]{8,}/i,
+  /:\/\/[^/\s:@]+:[^/\s:@]+@/,
+];
+
+export function containsShellHistorySecret(command: string): boolean {
+  const unescaped = command.replace(/\\([\s:])/g, "$1");
+  return SECRET_COMMAND_PATTERNS.some((pattern) => pattern.test(command) || pattern.test(unescaped));
 }
 
 function normalizePersistedEntries(value: unknown): PersistedHistoryEntry[] {
@@ -143,7 +162,7 @@ function normalizePersistedEntries(value: unknown): PersistedHistoryEntry[] {
     const timestamp = typeof entry.timestamp === "number" && Number.isFinite(entry.timestamp)
       ? entry.timestamp
       : 0;
-    if (!command || !cwd || !Number.isFinite(timestamp)) continue;
+    if (!command || !cwd || !Number.isFinite(timestamp) || containsShellHistorySecret(command)) continue;
     entries.push({ command, cwd, timestamp });
   }
   return entries;
@@ -154,7 +173,9 @@ export function readProjectHistory(cwd: string): PersistedHistoryEntry[] {
 
   for (const filePath of projectHistoryPaths(cwd)) {
     try {
-      if (!canWriteProjectHistoryPath(filePath) || !lstatSync(filePath).isFile()) continue;
+      if (!canWriteProjectHistoryPath(filePath)) continue;
+      const stats = lstatSync(filePath);
+      if (!stats.isFile() || stats.size > MAX_PROJECT_HISTORY_BYTES) continue;
 
       const parsed = JSON.parse(readFileSync(filePath, "utf8"));
       if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) continue;
@@ -179,7 +200,7 @@ export function readProjectHistory(cwd: string): PersistedHistoryEntry[] {
 
 export function appendProjectHistory(cwd: string, command: string, entryCwd: string): void {
   const normalizedCommand = command.trim();
-  if (!normalizedCommand) return;
+  if (!normalizedCommand || containsShellHistorySecret(normalizedCommand)) return;
 
   const existing = readProjectHistory(cwd);
   const next: PersistedHistoryEntry[] = [
@@ -214,7 +235,7 @@ function writeProjectHistoryAtomically(filePath: string, contents: string): bool
   let tempPath = "";
   try {
     tempPath = `${filePath}.${process.pid}.${Date.now()}.tmp`;
-    writeFileSync(tempPath, contents, { flag: "wx" });
+    writeFileSync(tempPath, contents, { flag: "wx", mode: 0o600 });
     try {
       if (lstatSync(filePath).isSymbolicLink()) {
         unlinkSync(tempPath);
@@ -368,7 +389,7 @@ export function readGlobalShellHistory(shellPath: string): string[] {
     if (cached?.key === cacheKey) return cached.value;
 
     const parsed = parse(readFileSync(filePath, "utf8"));
-    return memoizeHistory(globalHistoryCache, shellPath, parsed);
+    return memoizeHistory(globalHistoryCache, shellPath, cacheKey, parsed);
   } catch (error) {
     // Global shell history is optional recall data. If it is unavailable, shell predictions
     // should degrade to other sources instead of failing the editor.
@@ -384,7 +405,7 @@ export function matchHistoryEntries(entries: string[], prefix: string, limit: nu
 
   for (const rawEntry of entries) {
     const entry = rawEntry?.trim();
-    if (!entry || seen.has(entry)) continue;
+    if (!entry || seen.has(entry) || containsShellHistorySecret(entry)) continue;
     if (trimmedPrefix && !entry.startsWith(trimmedPrefix)) continue;
     seen.add(entry);
     matches.push(entry);

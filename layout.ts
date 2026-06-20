@@ -9,19 +9,20 @@ import { visibleWidth } from "@earendil-works/pi-tui";
  *
  * Returns `null` when the two groups cannot fit side by side on one row (the
  * caller should fall back to a stacked / overflow layout). Either side may be
- * empty: an empty right group yields the left content unchanged (or `null` when
- * both sides are empty), and an empty left group right-aligns the right group on
- * its own.
+ * empty: an empty right group yields the left content unchanged when it fits
+ * (or `null` when both sides are empty), and an empty left group right-aligns
+ * the right group on its own.
  */
 export function joinLeftRight(
   leftContent: string,
   rightContent: string,
   availableWidth: number,
 ): string | null {
-  if (rightContent === "") {
-    return leftContent === "" ? null : leftContent;
-  }
   const leftWidth = visibleWidth(leftContent);
+  if (rightContent === "") {
+    if (leftContent === "") return null;
+    return leftWidth <= availableWidth ? leftContent : null;
+  }
   const rightWidth = visibleWidth(rightContent);
   const pad = availableWidth - leftWidth - rightWidth;
   if (pad < 0) return null;

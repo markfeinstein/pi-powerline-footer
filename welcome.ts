@@ -1,9 +1,11 @@
-import { readdirSync, existsSync, lstatSync, readFileSync } from "node:fs";
+import { opendirSync, existsSync, lstatSync, readFileSync } from "node:fs";
+import type { Dirent } from "node:fs";
 import { join, basename } from "node:path";
 import { homedir as osHomedir } from "node:os";
 import type { Component } from "@earendil-works/pi-tui";
 import { truncateToWidth as tuiTruncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { ansi, fgOnly, getFgAnsiCode } from "./colors.ts";
+import { stripTerminalControlSequences } from "./sanitize.ts";
 
 export interface RecentSession {
   name: string;
@@ -16,6 +18,9 @@ export interface LoadedCounts {
   skills: number;
   promptTemplates: number;
 }
+
+const WELCOME_SCAN_MAX_DEPTH = 8;
+const WELCOME_SCAN_MAX_ENTRIES = 2000;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Shared rendering utilities
@@ -227,7 +232,7 @@ export class WelcomeComponent implements Component {
     recentSessions: RecentSession[] = [],
     loadedCounts: LoadedCounts = { contextFiles: 0, extensions: 0, skills: 0, promptTemplates: 0 },
   ) {
-    this.data = { modelName, providerName, recentSessions, loadedCounts };
+    this.data = sanitizeWelcomeData({ modelName, providerName, recentSessions, loadedCounts });
   }
 
   setCountdown(seconds: number): void {
@@ -277,7 +282,7 @@ export class WelcomeHeader implements Component {
     recentSessions: RecentSession[] = [],
     loadedCounts: LoadedCounts = { contextFiles: 0, extensions: 0, skills: 0, promptTemplates: 0 },
   ) {
-    this.data = { modelName, providerName, recentSessions, loadedCounts };
+    this.data = sanitizeWelcomeData({ modelName, providerName, recentSessions, loadedCounts });
   }
 
   invalidate(): void {}
@@ -332,6 +337,38 @@ function logDiscoveryError(scope: string, error: unknown): void {
   }
 
   console.debug(`[powerline-welcome] ${scope}:`, error);
+}
+
+function sanitizeWelcomeText(text: string): string {
+  return stripTerminalControlSequences(text).replace(/[\r\n\t]+/g, " ");
+}
+
+function sanitizeWelcomeData(data: WelcomeData): WelcomeData {
+  return {
+    modelName: sanitizeWelcomeText(data.modelName),
+    providerName: sanitizeWelcomeText(data.providerName),
+    recentSessions: data.recentSessions.map((session) => ({
+      name: sanitizeWelcomeText(session.name),
+      timeAgo: sanitizeWelcomeText(session.timeAgo),
+    })),
+    loadedCounts: data.loadedCounts,
+  };
+}
+
+function canScanDiscoveryDirectory(dir: string): boolean {
+  try {
+    const stats = lstatSync(dir);
+    if (!stats.isDirectory() || stats.isSymbolicLink()) {
+      console.debug(`[powerline-welcome] Ignoring unsafe scan directory at ${dir}`);
+      return false;
+    }
+    return true;
+  } catch (error) {
+    if (!isFileNotFoundError(error)) {
+      logDiscoveryError(`Failed to inspect scan directory ${dir}`, error);
+    }
+    return false;
+  }
 }
 
 function readDiscoverySettings(settingsPath: string): Record<string, unknown> | null {
@@ -440,42 +477,52 @@ export function discoverLoadedCounts(): LoadedCounts {
     }
   }
 
+  let scannedExtensionEntries = 0;
   for (const dir of extensionDirs) {
-    if (existsSync(dir)) {
-      try {
-        const entries = readdirSync(dir);
-        for (const entry of entries) {
-          const entryPath = join(dir, entry);
+    if (scannedExtensionEntries >= WELCOME_SCAN_MAX_ENTRIES || !canScanDiscoveryDirectory(dir)) continue;
 
-          try {
-            const stats = lstatSync(entryPath);
-            if (stats.isSymbolicLink()) continue;
+    let handle: ReturnType<typeof opendirSync> | null = null;
+    try {
+      handle = opendirSync(dir);
+      let entry: Dirent | null;
+      while (scannedExtensionEntries < WELCOME_SCAN_MAX_ENTRIES && (entry = handle.readSync()) !== null) {
+        scannedExtensionEntries++;
+        const entryPath = join(dir, entry.name);
 
-            if (stats.isDirectory()) {
-              if (
-                existsSync(join(entryPath, "index.ts")) ||
-                existsSync(join(entryPath, "index.js")) ||
-                existsSync(join(entryPath, "package.json"))
-              ) {
-                if (!countedExtensions.has(entry)) {
-                  countedExtensions.add(entry);
-                  extensions++;
-                }
-              }
-            } else if ((entry.endsWith(".ts") || entry.endsWith(".js")) && !entry.startsWith(".")) {
-              const ext = entry.endsWith(".ts") ? ".ts" : ".js";
-              const name = basename(entry, ext);
-              if (!countedExtensions.has(name)) {
-                countedExtensions.add(name);
+        try {
+          const stats = lstatSync(entryPath);
+          if (stats.isSymbolicLink()) continue;
+
+          if (stats.isDirectory()) {
+            if (
+              existsSync(join(entryPath, "index.ts")) ||
+              existsSync(join(entryPath, "index.js")) ||
+              existsSync(join(entryPath, "package.json"))
+            ) {
+              if (!countedExtensions.has(entry.name)) {
+                countedExtensions.add(entry.name);
                 extensions++;
               }
             }
-          } catch (error) {
-            logDiscoveryError(`Failed to inspect extension entry ${entryPath}`, error);
+          } else if ((entry.name.endsWith(".ts") || entry.name.endsWith(".js")) && !entry.name.startsWith(".")) {
+            const ext = entry.name.endsWith(".ts") ? ".ts" : ".js";
+            const name = basename(entry.name, ext);
+            if (!countedExtensions.has(name)) {
+              countedExtensions.add(name);
+              extensions++;
+            }
           }
+        } catch (error) {
+          logDiscoveryError(`Failed to inspect extension entry ${entryPath}`, error);
         }
-      } catch (error) {
-        logDiscoveryError(`Failed to scan extensions dir ${dir}`, error);
+      }
+    } catch (error) {
+      logDiscoveryError(`Failed to scan extensions dir ${dir}`, error);
+    } finally {
+      try {
+        handle?.closeSync();
+      } catch {
+        // Best-effort cleanup.
       }
     }
   }
@@ -487,30 +534,40 @@ export function discoverLoadedCounts(): LoadedCounts {
   ];
   
   const countedSkills = new Set<string>();
+  let scannedSkillEntries = 0;
   
   for (const dir of skillDirs) {
-    if (existsSync(dir)) {
-      try {
-        const entries = readdirSync(dir);
-        for (const entry of entries) {
-          const entryPath = join(dir, entry);
-          try {
-            const stats = lstatSync(entryPath);
-            if (stats.isSymbolicLink()) continue;
-            if (stats.isDirectory()) {
-              if (existsSync(join(entryPath, "SKILL.md"))) {
-                if (!countedSkills.has(entry)) {
-                  countedSkills.add(entry);
-                  skills++;
-                }
+    if (scannedSkillEntries >= WELCOME_SCAN_MAX_ENTRIES || !canScanDiscoveryDirectory(dir)) continue;
+
+    let handle: ReturnType<typeof opendirSync> | null = null;
+    try {
+      handle = opendirSync(dir);
+      let entry: Dirent | null;
+      while (scannedSkillEntries < WELCOME_SCAN_MAX_ENTRIES && (entry = handle.readSync()) !== null) {
+        scannedSkillEntries++;
+        const entryPath = join(dir, entry.name);
+        try {
+          const stats = lstatSync(entryPath);
+          if (stats.isSymbolicLink()) continue;
+          if (stats.isDirectory()) {
+            if (existsSync(join(entryPath, "SKILL.md"))) {
+              if (!countedSkills.has(entry.name)) {
+                countedSkills.add(entry.name);
+                skills++;
               }
             }
-          } catch (error) {
-            logDiscoveryError(`Failed to inspect skill entry ${entryPath}`, error);
           }
+        } catch (error) {
+          logDiscoveryError(`Failed to inspect skill entry ${entryPath}`, error);
         }
-      } catch (error) {
-        logDiscoveryError(`Failed to scan skills dir ${dir}`, error);
+      }
+    } catch (error) {
+      logDiscoveryError(`Failed to scan skills dir ${dir}`, error);
+    } finally {
+      try {
+        handle?.closeSync();
+      } catch {
+        // Best-effort cleanup.
       }
     }
   }
@@ -524,19 +581,23 @@ export function discoverLoadedCounts(): LoadedCounts {
   
   const countedTemplates = new Set<string>();
   
-  function countTemplatesInDir(dir: string) {
-    if (!existsSync(dir)) return;
+  let scannedTemplateEntries = 0;
+  function countTemplatesInDir(dir: string, depth = 0) {
+    if (depth > WELCOME_SCAN_MAX_DEPTH || scannedTemplateEntries >= WELCOME_SCAN_MAX_ENTRIES || !canScanDiscoveryDirectory(dir)) return;
+    let handle;
     try {
-      const entries = readdirSync(dir);
-      for (const entry of entries) {
-        const entryPath = join(dir, entry);
+      handle = opendirSync(dir);
+      let entry;
+      while (scannedTemplateEntries < WELCOME_SCAN_MAX_ENTRIES && (entry = handle.readSync()) !== null) {
+        scannedTemplateEntries++;
+        const entryPath = join(dir, entry.name);
         try {
           const stats = lstatSync(entryPath);
           if (stats.isSymbolicLink()) continue;
           if (stats.isDirectory()) {
-            countTemplatesInDir(entryPath);
-          } else if (entry.endsWith(".md")) {
-            const name = basename(entry, ".md");
+            countTemplatesInDir(entryPath, depth + 1);
+          } else if (entry.name.endsWith(".md")) {
+            const name = basename(entry.name, ".md");
             if (!countedTemplates.has(name)) {
               countedTemplates.add(name);
               promptTemplates++;
@@ -548,6 +609,8 @@ export function discoverLoadedCounts(): LoadedCounts {
       }
     } catch (error) {
       logDiscoveryError(`Failed to scan prompt template dir ${dir}`, error);
+    } finally {
+      handle?.closeSync();
     }
   }
   
@@ -570,19 +633,23 @@ export function getRecentSessions(maxCount: number = 3): RecentSession[] {
   ];
   
   const sessions: { name: string; mtime: number }[] = [];
+  let scannedSessionEntries = 0;
   
-  function scanDir(dir: string) {
-    if (!existsSync(dir)) return;
+  function scanDir(dir: string, depth = 0) {
+    if (depth > WELCOME_SCAN_MAX_DEPTH || scannedSessionEntries >= WELCOME_SCAN_MAX_ENTRIES || !canScanDiscoveryDirectory(dir)) return;
+    let handle;
     try {
-      const entries = readdirSync(dir);
-      for (const entry of entries) {
-        const entryPath = join(dir, entry);
+      handle = opendirSync(dir);
+      let entry;
+      while (scannedSessionEntries < WELCOME_SCAN_MAX_ENTRIES && (entry = handle.readSync()) !== null) {
+        scannedSessionEntries++;
+        const entryPath = join(dir, entry.name);
         try {
           const stats = lstatSync(entryPath);
           if (stats.isSymbolicLink()) continue;
           if (stats.isDirectory()) {
-            scanDir(entryPath);
-          } else if (entry.endsWith(".jsonl")) {
+            scanDir(entryPath, depth + 1);
+          } else if (entry.name.endsWith(".jsonl")) {
             const parentName = basename(dir);
             let projectName = parentName;
             if (parentName.startsWith("--")) {
@@ -597,6 +664,8 @@ export function getRecentSessions(maxCount: number = 3): RecentSession[] {
       }
     } catch (error) {
       logDiscoveryError(`Failed to scan sessions dir ${dir}`, error);
+    } finally {
+      handle?.closeSync();
     }
   }
   

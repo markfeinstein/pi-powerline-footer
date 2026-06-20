@@ -2,7 +2,7 @@ import { lstatSync, readFileSync } from "node:fs";
 import { homedir, hostname as osHostname } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import type { BuiltinStatusLineSegmentId, RenderedSegment, SegmentContext, SemanticColor, StatusLineSegment, StatusLineSegmentId } from "./types.ts";
-import { normalizeCompactExtensionStatus, normalizeExtensionStatusValue } from "./powerline-config.ts";
+import { normalizeCompactExtensionStatus, normalizeExtensionStatusValue, stripTerminalControlSequences } from "./powerline-config.ts";
 import { fg, rainbow, applyColor } from "./theme.ts";
 import { getIcons, hasNerdFonts, SEP_DOT, getThinkingText } from "./icons.ts";
 
@@ -18,11 +18,19 @@ function withIcon(icon: string, text: string): string {
   return icon ? `${icon} ${text}` : text;
 }
 
+function sanitizeSegmentText(value: string): string {
+  return stripTerminalControlSequences(value).replace(/[\r\n\t]/g, " ");
+}
+
 function formatTokens(n: number): string {
   if (n < 1000) return n.toString();
   if (n < 10000) return `${(n / 1000).toFixed(1)}k`;
-  if (n < 1000000) return `${Math.round(n / 1000)}k`;
-  if (n < 10000000) return `${(n / 1000000).toFixed(1)}M`;
+  // Round to whole thousands, but if that rounds up to 1000k promote to "1.0M"
+  // instead of emitting a wrong-unit value like "1000k".
+  if (n < 1000000 && Math.round(n / 1000) < 1000) return `${Math.round(n / 1000)}k`;
+  // Show one decimal of millions, but if that rounds up to 10.0 promote to a
+  // whole "10M" so it matches the >=10M formatting instead of showing "10.0M".
+  if (n < 10000000 && Number((n / 1000000).toFixed(1)) < 10) return `${(n / 1000000).toFixed(1)}M`;
   return `${Math.round(n / 1000000)}M`;
 }
 
@@ -73,9 +81,11 @@ function formatBasenamePath(pwd: string): string {
   const cached = basenamePathCache.get(pwd);
   if (cached) return cached;
 
-  const currentName = basename(pwd) || pwd;
+  const safePwd = sanitizeSegmentText(pwd);
+  const currentName = basename(safePwd) || safePwd;
   const gitDir = readLinkedWorktreeGitDir(pwd);
-  const repoName = gitDir ? repoNameFromWorktreeGitDir(gitDir) : null;
+  const rawRepoName = gitDir ? repoNameFromWorktreeGitDir(gitDir) : null;
+  const repoName = rawRepoName ? sanitizeSegmentText(rawRepoName) : null;
   const formatted = repoName && repoName !== currentName ? `${repoName}/${currentName}` : currentName;
 
   if (basenamePathCache.size >= BASENAME_PATH_CACHE_LIMIT) {
@@ -95,7 +105,7 @@ const modelSegment: StatusLineSegment = {
     const icons = getIcons();
     const opts = ctx.options.model ?? {};
 
-    let modelName = ctx.model?.name || ctx.model?.id || "no-model";
+    let modelName = sanitizeSegmentText(ctx.model?.name || ctx.model?.id || "no-model");
     // Strip "Claude " prefix for brevity
     if (modelName.startsWith("Claude ")) {
       modelName = modelName.slice(7);
@@ -104,7 +114,7 @@ const modelSegment: StatusLineSegment = {
     let content = withIcon(icons.model, modelName);
 
     if (opts.showThinkingLevel !== false && ctx.model?.reasoning) {
-      const level = ctx.thinkingLevel || "off";
+      const level = sanitizeSegmentText(ctx.thinkingLevel || "off") || "off";
       if (level !== "off") {
         const thinkingText = getThinkingText(level);
         if (thinkingText) {
@@ -124,9 +134,9 @@ const shellModeSegment: StatusLineSegment = {
       return { content: "", visible: false };
     }
 
-    const shellName = ctx.shellName ?? "shell";
+    const shellName = sanitizeSegmentText(ctx.shellName ?? "shell");
     const state = ctx.shellRunning ? "run" : "idle";
-    const cwd = ctx.shellCwd ? basename(ctx.shellCwd) : null;
+    const cwd = ctx.shellCwd ? basename(sanitizeSegmentText(ctx.shellCwd)) : null;
     const parts = [shellName, state];
     if (cwd) {
       parts.push(cwd);
@@ -143,13 +153,15 @@ const pathSegment: StatusLineSegment = {
     const opts = ctx.options.path ?? {};
     const mode = opts.mode ?? "basename";
 
-    let pwd = ctx.shellModeActive && ctx.shellCwd ? ctx.shellCwd : (ctx.cwd ?? process.cwd());
-    const home = process.env.HOME || process.env.USERPROFILE || homedir();
+    const rawPwd = ctx.shellModeActive && ctx.shellCwd ? ctx.shellCwd : (ctx.cwd ?? process.cwd());
+    let pwd = rawPwd;
+    const home = sanitizeSegmentText(process.env.HOME || process.env.USERPROFILE || homedir());
 
     if (mode === "basename") {
       // Show repo/worktree for linked worktree roots; otherwise just the last component.
-      pwd = formatBasenamePath(pwd);
+      pwd = formatBasenamePath(rawPwd);
     } else {
+      pwd = sanitizeSegmentText(pwd);
       // Abbreviate home directory for abbreviated/full modes
       if (home && (pwd === home || pwd.startsWith(`${home}${sep}`))) {
         pwd = `~${pwd.slice(home.length)}`;
@@ -198,7 +210,7 @@ const gitSegment: StatusLineSegment = {
     let content = "";
     if (showBranch && branch) {
       // Color just the branch name (icon + branch text)
-      content = color(ctx, branchColor, withIcon(icons.branch, branch));
+      content = color(ctx, branchColor, withIcon(icons.branch, sanitizeSegmentText(branch)));
     }
 
     // Add status indicators (each with their own color, not wrapped)
@@ -233,7 +245,7 @@ const gitSegment: StatusLineSegment = {
 const thinkingSegment: StatusLineSegment = {
   id: "thinking",
   render(ctx) {
-    const level = ctx.thinkingLevel || "off";
+    const level = sanitizeSegmentText(ctx.thinkingLevel || "off") || "off";
 
     // Full level name without an icon or "think:" prefix.
     const content = level;
@@ -325,6 +337,9 @@ const contextPctSegment: StatusLineSegment = {
   id: "context_pct",
   render(ctx) {
     if (ctx.customCompactionEnabled) return { content: "", visible: false };
+    if (!Number.isFinite(ctx.contextWindow) || ctx.contextWindow <= 0 || !Number.isFinite(ctx.contextPercent)) {
+      return { content: "", visible: false };
+    }
 
     const icons = getIcons();
     const pct = ctx.contextPercent;
@@ -415,7 +430,7 @@ const hostnameSegment: StatusLineSegment = {
   id: "hostname",
   render() {
     const icons = getIcons();
-    const name = osHostname().split(".")[0];
+    const name = sanitizeSegmentText(osHostname()).split(".")[0] || "host";
     return { content: withIcon(icons.host, name), visible: true };
   },
 };

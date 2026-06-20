@@ -65,7 +65,7 @@ test("chat jump shortcuts are configurable and route through fixed editor scroll
   assert.match(source, /shortcutKey: "jumpPreviousLlmMessage"/);
   assert.match(source, /shortcutKey: "jumpNextLlmMessage"/);
   assert.match(source, /shortcutKey: "jumpChatBottom"/);
-  assert.match(source, /pi\.registerShortcut\(resolvedShortcuts\[shortcutKey\]/);
+  assert.match(source, /registerDynamicShortcut\(resolvedShortcuts\[shortcutKey\], description, \{ kind: "chat", action \}\)/);
   assert.match(source, /function collectChatMessageStartLines\(role: ChatJumpRole\): number\[\]/);
   assert.match(source, /componentName === "UserMessageComponent"/);
   assert.match(source, /componentName === "SkillInvocationMessageComponent"/);
@@ -74,8 +74,8 @@ test("chat jump shortcuts are configurable and route through fixed editor scroll
   assert.match(source, /fixedEditorCompositor\.jumpToNextRootTarget\(targets\)/);
   assert.match(source, /fixedEditorCompositor\.jumpToRootBottom\(\)/);
   assert.match(source, /function getChatJumpShortcutAction\(data: string\): ChatJumpShortcutAction \| null/);
-  assert.match(source, /let resolvedShortcuts = resolveShortcutConfig\(startupSettings\)/);
-  assert.match(source, /resolvedShortcuts = resolveShortcutConfig\(settings\)/);
+  assert.match(source, /let resolvedShortcuts = resolveShortcutConfig\(startupSettings, \[bashToggleShortcutCandidate\]\)/);
+  assert.match(source, /resolvedShortcuts = resolveShortcutConfig\(settings, \[bashToggleShortcutCandidate\]\)/);
   assert.match(source, /keyboardScrollShortcuts: \{\n\s+up: resolvedShortcuts\.scrollChatUp,\n\s+down: resolvedShortcuts\.scrollChatDown,/);
   assert.match(source, /editorBoundaryShortcuts: \{\n\s+start: resolvedShortcuts\.editorStart,\n\s+end: resolvedShortcuts\.editorEnd,/);
   assert.match(source, /modifier === "cmd" \|\| modifier === "command" \? "super" : modifier/);
@@ -123,11 +123,11 @@ test("context usage changes repaint from live streaming message usage", () => {
   assert.match(source, /let liveAssistantUsage: SessionAssistantUsage \| null = null/);
   assert.doesNotMatch(source, /const requestContextStatusRender/);
   assert.match(source, /lastUserPrompt = "";\n\s+isStreaming = false;\n\s+liveAssistantUsage = null;\n\s+stashedEditorText = null;/);
-  assert.match(source, /pi\.on\("agent_start", async \(_event, ctx\) => \{\n\s+isStreaming = true;\n\s+liveAssistantUsage = null;\n\s+onVibeAgentStart\(\);\n\s+dismissWelcome\(ctx\);\n\s+currentCtx = ctx;\n\s+\}\);/);
+  assert.match(source, /pi\.on\("agent_start", async \(_event, ctx\) => \{\n\s+isStreaming = true;\n\s+liveAssistantUsage = null;\n\s+onVibeAgentStart\(ctx\.hasUI \? \(message\) => ctx\.ui\.setWorkingMessage\(message\) : undefined\);\n\s+dismissWelcome\(ctx\);\n\s+currentCtx = ctx;\n\s+\}\);/);
   assert.match(source, /pi\.on\("message_update", async \(event, ctx\) => \{\n\s+if \(isSessionAssistantMessage\(event\.message\)\n\s+&& event\.message\.stopReason !== "error"\n\s+&& event\.message\.stopReason !== "aborted"\n\s+&& getUsageTokenTotal\(event\.message\.usage\) > 0\) \{\n\s+liveAssistantUsage = event\.message\.usage;\n\s+currentCtx = ctx;\n\s+layoutDirty = true;\n\s+statusRenderScheduler\.schedule\(CONTEXT_STATUS_RENDER_MS\);\n\s+\}\n\s+\}\);/);
   assert.match(source, /pi\.on\("message_end", async \(event, ctx\) => \{\n\s+currentCtx = ctx;\n\s+if \(isSessionAssistantMessage\(event\.message\)\) \{\n\s+if \(event\.message\.stopReason === "error" \|\| event\.message\.stopReason === "aborted"\) \{\n\s+liveAssistantUsage = null;\n\s+\} else if \(getUsageTokenTotal\(event\.message\.usage\) > 0\) \{\n\s+liveAssistantUsage = event\.message\.usage;\n\s+\}\n\s+\}\n\s+requestImmediateStatusRender\(\{ deferDuringTyping: false \}\);\n\s+\}\);/);
   assert.match(source, /pi\.on\("agent_end", async \(_event, ctx\) => \{\n\s+isStreaming = false;\n\s+liveAssistantUsage = null;\n\s+currentCtx = ctx;/);
-  assert.match(source, /pi\.on\("session_tree", async \(_event, ctx\) => \{\n\s+currentCtx = ctx;\n\s+currentThinkingLevel = null;\n\s+liveAssistantUsage = null;\n\s+requestImmediateStatusRender\(\{ deferDuringTyping: false \}\);\n\s+\}\);/);
+  assert.match(source, /pi\.on\("session_tree", async \(_event, ctx\) => \{\n\s+currentCtx = ctx;\n\s+currentThinkingLevel = null;\n\s+liveAssistantUsage = null;\n\s+resetSessionSummaryCache\(\);\n\s+requestImmediateStatusRender\(\{ deferDuringTyping: false \}\);\n\s+\}\);/);
   assert.match(source, /if \(getUsageTokenTotal\(m\.usage\) > 0\) \{\n\s+lastAssistant = m;\n\s+\}/);
   assert.match(source, /const coreContextUsage = isStreaming && liveAssistantUsage \? null : readCoreContextUsage\(ctx\)/);
   assert.match(source, /const contextTokens = coreContextUsage\?\.contextTokens \?\? \(latestUsage \? getUsageTokenTotal\(latestUsage\) : 0\)/);
@@ -142,7 +142,8 @@ test("extension status changes invalidate powerline status rendering", () => {
   assert.match(source, /const installFooterStatusRepaintHook = \(footerData: ReadonlyFooterDataProvider\) => \{/);
   assert.match(source, /setExtensionStatus\?: \(key: string, text: string \| undefined\) => void/);
   assert.match(source, /const setExtensionStatusAndRepaint = function setExtensionStatusAndRepaint/);
-  assert.match(source, /originalSetExtensionStatus\.call\(this, key, text\);\n\s+requestImmediateStatusRender\(\);/);
+  assert.match(source, /originalSetExtensionStatus\.call\(this, key, text\);\n\s+resetStatusLinesCache\(\);\n\s+requestStatusRender\(\);/);
+  assert.match(source, /if \(footerData\.getExtensionStatuses\(\)\.size === 0\) \{\n\s+return;\n\s+\}/);
   assert.match(source, /installFooterStatusRepaintHook\(footerData\);/);
   assert.match(source, /if \(writableFooterData\.setExtensionStatus === setExtensionStatusAndRepaint\) \{\n\s+writableFooterData\.setExtensionStatus = originalSetExtensionStatus;/);
   assert.match(source, /if \(clearExtensionStatusesAndRepaint && writableFooterData\.clearExtensionStatuses === clearExtensionStatusesAndRepaint\)/);
@@ -154,7 +155,7 @@ test("fixed editor captures Pi status messages with the editor cluster", () => {
   assert.match(source, /const statusContainerCandidate = tuiChildren\[editorContainerMatch\.index - 2\] \?\? null/);
   assert.match(source, /fixedStatusContainer = statusContainerCandidate && typeof statusContainerCandidate\.render === "function"/);
   assert.match(source, /compositor\.renderHidden\(fixedStatusContainer, width\)\.filter\(\(line\) => visibleWidth\(line\) > 0\)/);
-  assert.match(source, /statusLines = \[\.\.\.renderPowerlineStatusLines\(width\), \.\.\.workingStatusLines\]/);
+  assert.match(source, /let statusLines = \[\.\.\.baseStatusLines, \.\.\.workingStatusLines\]/);
   // Third-party aboveEditor widgets (e.g. a todo list) are kept out of the
   // powerline status rows so statusBelowPrompt cannot drag them under the editor.
   assert.match(source, /aboveEditorWidgetLines: aboveWidgetLines,/);
@@ -203,7 +204,8 @@ test("powerline fallback routing rejects reserved Pi shortcut defaults", () => {
   assert.match(source, /const SHORTCUT_MODIFIER_ORDER = \["ctrl", "alt", "super", "shift"\] as const/);
   assert.match(source, /const SHORTCUT_MODIFIERS = new Set\(SHORTCUT_MODIFIER_ORDER\)/);
   assert.match(source, /modifierRank\.get\(a\)/);
-  assert.match(source, /configuredToggleShortcut && !reservedShortcuts\(\)\.has\(shortcutUsageKey\(configuredToggleShortcut\)\)/);
+  assert.match(source, /const used = new Set\(Array\.from\(reservedShortcuts\(\), shortcutUsageKey\)\)/);
+  assert.match(source, /used\.add\(shortcutUsageKey\(powerlineShortcuts\[key\]\)\)/);
 });
 
 test("powerline shortcuts have terminal-input fallback routing", () => {

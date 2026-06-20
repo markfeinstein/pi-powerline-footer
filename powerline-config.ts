@@ -2,6 +2,10 @@ import { visibleWidth } from "@earendil-works/pi-tui";
 import type { BuiltinStatusLineSegmentId, ColorValue, CustomItemPosition, CustomLayoutConfig, CustomStatusItem, PresetDef, StatusLinePreset, StatusLineSegmentId, StatusLineSegmentOptions } from "./types.ts";
 import { isSeparatorStyle } from "./separators.ts";
 import { DEFAULT_PILL_BACKGROUND } from "./pills.ts";
+import { stripTerminalControlSequences } from "./sanitize.ts";
+
+// Re-exported for backwards compatibility with existing importers.
+export { stripTerminalControlSequences };
 
 // Runtime set of every built-in segment id. The `satisfies` check makes the
 // compiler fail if a BuiltinStatusLineSegmentId is added/removed without
@@ -90,15 +94,18 @@ function normalizeCustomItemPosition(value: unknown): CustomItemPosition {
   return "right";
 }
 
+function normalizeSingleLineStatusText(value: string): string {
+  return stripTerminalControlSequences(value).replace(/[\r\n\t]+/g, " ");
+}
+
 function normalizeCustomColor(value: unknown): ColorValue | undefined {
-  if (typeof value !== "string") return undefined;
-  const normalized = value.trim();
+  const normalized = normalizeColorValue(value);
   return normalized ? (normalized as ColorValue) : undefined;
 }
 
 function normalizeCustomPrefix(value: unknown): string | undefined {
   if (typeof value !== "string") return undefined;
-  const normalized = stripTerminalControlSequences(value).trim();
+  const normalized = normalizeSingleLineStatusText(value).trim();
   return normalized ? normalized : undefined;
 }
 
@@ -183,13 +190,10 @@ function normalizeColorValue(value: unknown): string {
   return HEX_COLOR.test(normalized) || THEME_COLOR_NAME.test(normalized) ? normalized : "";
 }
 
-export function stripTerminalControlSequences(value: string): string {
-  return value
-    .replace(/\x1B\][^\u0007]*(?:\u0007|\x1B\\)/g, "")
-    .replace(/\x1B[P\]^_].*?\x1B\\/g, "")
-    .replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, "")
-    .replace(/\x1B[@-_]/g, "")
-    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, "");
+function normalizeHexColor(value: unknown): string {
+  if (typeof value !== "string") return "";
+  const normalized = value.trim();
+  return HEX_COLOR.test(normalized) ? normalized : "";
 }
 
 // Parse `powerline.pillColors`: an object mapping segment id -> hex color.
@@ -290,7 +294,7 @@ export function parsePowerlineConfig(value: unknown, presets: readonly StatusLin
       ? value.pillBackground
       : DEFAULT_PILL_BACKGROUND,
     pillColors: normalizePillColors(value.pillColors),
-    pillForeground: normalizeColorValue(value.pillForeground),
+    pillForeground: normalizeHexColor(value.pillForeground),
     pillTextColors: normalizePillColors(value.pillTextColors),
     pillGroups: normalizePillGroups(value.pillGroups),
     alwaysShowTokens: value.alwaysShowTokens === true,
@@ -383,7 +387,7 @@ export function normalizeExtensionStatusValue(value: string): string | null {
     return null;
   }
 
-  const stripped = stripTerminalControlSequences(value).replace(/(\s|·|[|])+$/, "");
+  const stripped = normalizeSingleLineStatusText(value).replace(/(\s|·|[|])+$/, "");
   return visibleWidth(stripped) > 0 ? stripped : null;
 }
 
