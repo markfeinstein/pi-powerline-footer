@@ -6,14 +6,18 @@
   "files": [
     "README.md",
     "CHANGELOG.md",
+    "CONTRIBUTING.md",
     "theme.example.json",
     "banner.png",
     "colors.ts",
     "context-usage.ts",
+    "editor-composition.ts",
     "git-status.ts",
     "icons.ts",
     "index.ts",
     "layout.ts",
+    "lifecycle.ts",
+    "paths.ts",
     "pills.ts",
     "powerline-config.ts",
     "presets.ts",
@@ -23,6 +27,7 @@
     "segments.ts",
     "separators.ts",
     "shortcuts.ts",
+    "terminal-cursor.ts",
     "theme.ts",
     "types.ts",
     "welcome-dismiss.ts",
@@ -53,14 +58,14 @@
     "pack:check": "npm pack --dry-run --json | node scripts/validate-pack.mjs"
   },
   "peerDependencies": {
-    "@earendil-works/pi-ai": ">=0.79.0 <0.80.0",
-    "@earendil-works/pi-coding-agent": ">=0.79.0 <0.80.0",
-    "@earendil-works/pi-tui": ">=0.79.0 <0.80.0"
+    "@earendil-works/pi-ai": ">=0.74.0 <0.81.0",
+    "@earendil-works/pi-coding-agent": ">=0.74.0 <0.81.0",
+    "@earendil-works/pi-tui": ">=0.74.0 <0.81.0"
   },
   "devDependencies": {
-    "@earendil-works/pi-ai": "0.79.1",
-    "@earendil-works/pi-coding-agent": "0.79.1",
-    "@earendil-works/pi-tui": "0.79.1"
+    "@earendil-works/pi-ai": "^0.80.3",
+    "@earendil-works/pi-coding-agent": "^0.80.3",
+    "@earendil-works/pi-tui": "^0.80.3"
   },
   "pi": {
     "extensions": [

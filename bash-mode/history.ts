@@ -1,6 +1,6 @@
 import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
-import { homedir } from "node:os";
+import { getAgentPath, getHomeDir } from "../paths.ts";
 import { projectStorageKey } from "../project-key.ts";
 
 interface PersistedHistoryEntry {
@@ -23,12 +23,8 @@ type CachedHistory<T> = {
 
 const globalHistoryCache = new Map<string, CachedHistory<string[]>>();
 
-function getHomeDir(): string {
-  return process.env.HOME || process.env.USERPROFILE || homedir();
-}
-
 function getHistoryDir(): string {
-  return join(getHomeDir(), ".pi", "agent", "powerline-footer", "bash-history");
+  return getAgentPath("powerline-footer", "bash-history");
 }
 
 function isPathInside(parent: string, child: string): boolean {

@@ -9,8 +9,8 @@ import { getOneOffBashCommandContext } from "./completion.ts";
 import type { GhostSuggestion } from "./types.ts";
 
 interface EditorBoundaryShortcuts {
-  start: string;
-  end: string;
+  start: string | null;
+  end: string | null;
 }
 
 interface BashModeEditorOptions {
@@ -238,6 +238,11 @@ export class BashModeEditor extends CustomEditor {
     super(tui, theme, keybindings);
     this.keybindingsRef = keybindings;
     this.optionsRef = options;
+  }
+
+  setAutocompleteProvider(provider: AutocompleteProvider): void {
+    super.setAutocompleteProvider(provider);
+    this.wrappedProviderInstalled = false;
   }
 
   installAutocompleteProvider(provider: AutocompleteProvider): void {
@@ -601,8 +606,16 @@ export class BashModeEditor extends CustomEditor {
 
     const lines = this.getLines();
     const cursor = this.getCursor();
-    const lastLine = Math.max(0, lines.length - 1);
-    return cursor.line === lastLine && cursor.col === (lines[lastLine]?.length ?? 0);
+    if (lines.length === 1) {
+      return cursor.line === 0 && cursor.col === (lines[0]?.length ?? 0);
+    }
+
+    const isOnFirstVisualLine = Reflect.get(this, "isOnFirstVisualLine");
+    if (typeof isOnFirstVisualLine === "function" && !isOnFirstVisualLine.call(this)) {
+      return false;
+    }
+
+    return cursor.line === 0;
   }
 
   private navigateShellHistory(direction: -1 | 1): void {

@@ -2834,6 +2834,23 @@ test("bash editor recalls prompt history from the editor end without losing the 
     midLineEditor.handleInput("\x1b[A");
 
     assert.equal(midLineEditor.getText(), "draft");
+
+    const multilineEditor = createEditor();
+    multilineEditor.addToHistory("previous prompt");
+    multilineEditor.setText("first line\nsecond line");
+    multilineEditor.handleInput("\x1b[A");
+
+    assert.equal(multilineEditor.getText(), "first line\nsecond line");
+    assert.equal(Reflect.get(multilineEditor, "historyIndex"), -1);
+
+    const firstLineEditor = createEditor();
+    firstLineEditor.addToHistory("previous prompt");
+    firstLineEditor.setText("first line\nsecond line");
+    Reflect.set(Reflect.get(firstLineEditor, "state"), "cursorLine", 0);
+    Reflect.set(Reflect.get(firstLineEditor, "state"), "cursorCol", 0);
+    firstLineEditor.handleInput("\x1b[A");
+
+    assert.equal(firstLineEditor.getText(), "previous prompt");
   } finally {
     links.cleanup();
   }

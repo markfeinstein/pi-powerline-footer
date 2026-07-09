@@ -6,6 +6,18 @@ import { basename, join } from "node:path";
 
 const FAUX_PROVIDER_PATH = new URL("../node_modules/@earendil-works/pi-ai/dist/providers/faux.js", import.meta.url).href;
 
+async function importFauxProviderTools() {
+  try {
+    return await import("@earendil-works/pi-ai/compat");
+  } catch (error) {
+    const code = error && typeof error === "object" ? Reflect.get(error, "code") : undefined;
+    if (code !== "ERR_PACKAGE_PATH_NOT_EXPORTED" && code !== "ERR_MODULE_NOT_FOUND") {
+      throw error;
+    }
+    return import(FAUX_PROVIDER_PATH);
+  }
+}
+
 function ensurePiModuleLinks(): { cleanup: () => void } {
   const nodeModulesDir = join(process.cwd(), "node_modules", "@earendil-works");
   const requiredModules = ["pi-coding-agent", "pi-ai"];
@@ -230,7 +242,7 @@ test("generateVibesBatch includes a system prompt so faux providers can return t
   process.env.HOME = home;
 
   try {
-    const { fauxAssistantMessage, registerFauxProvider } = await import(FAUX_PROVIDER_PATH);
+    const { fauxAssistantMessage, registerFauxProvider } = await importFauxProviderTools();
     const { generateVibesBatch, initVibeManager, setVibeModel } = await import("../working-vibes.ts");
 
     const registration = registerFauxProvider({
@@ -292,7 +304,7 @@ test("generateVibesBatch caps model output to the requested count", async () => 
   process.env.HOME = home;
 
   try {
-    const { fauxAssistantMessage, registerFauxProvider } = await import(FAUX_PROVIDER_PATH);
+    const { fauxAssistantMessage, registerFauxProvider } = await importFauxProviderTools();
     const { generateVibesBatch, initVibeManager, setVibeModel } = await import("../working-vibes.ts");
 
     const registration = registerFauxProvider({
@@ -350,7 +362,7 @@ test("on-demand vibe generation strips terminal controls before display", async 
   process.env.HOME = home;
 
   try {
-    const { fauxAssistantMessage, registerFauxProvider } = await import(FAUX_PROVIDER_PATH);
+    const { fauxAssistantMessage, registerFauxProvider } = await importFauxProviderTools();
     const { initVibeManager, onVibeAgentStart, onVibeBeforeAgentStart, setVibeModel, setVibeTheme } = await import("../working-vibes.ts");
 
     const registration = registerFauxProvider({
@@ -420,7 +432,7 @@ test("on-demand vibe truncation does not split surrogate pairs", async () => {
   writeFileSync(join(home, ".pi", "agent", "settings.json"), JSON.stringify({ workingVibeMaxLength: 8 }) + "\n");
 
   try {
-    const { fauxAssistantMessage, registerFauxProvider } = await import(FAUX_PROVIDER_PATH);
+    const { fauxAssistantMessage, registerFauxProvider } = await importFauxProviderTools();
     const { initVibeManager, onVibeAgentStart, onVibeBeforeAgentStart, setVibeModel, setVibeTheme } = await import("../working-vibes.ts");
 
     const registration = registerFauxProvider({
@@ -480,7 +492,7 @@ test("on-demand vibe generation redacts prompt secrets before model calls", asyn
   process.env.HOME = home;
 
   try {
-    const { fauxAssistantMessage, registerFauxProvider } = await import(FAUX_PROVIDER_PATH);
+    const { fauxAssistantMessage, registerFauxProvider } = await importFauxProviderTools();
     const { initVibeManager, onVibeAgentStart, onVibeBeforeAgentStart, setVibeModel, setVibeTheme } = await import("../working-vibes.ts");
 
     const registration = registerFauxProvider({
@@ -551,7 +563,7 @@ test("tool-call vibe generation redacts authorization values", async () => {
   writeFileSync(join(home, ".pi", "agent", "settings.json"), JSON.stringify({ workingVibeRefreshInterval: 0 }) + "\n");
 
   try {
-    const { fauxAssistantMessage, registerFauxProvider } = await import(FAUX_PROVIDER_PATH);
+    const { fauxAssistantMessage, registerFauxProvider } = await importFauxProviderTools();
     const { initVibeManager, onVibeAgentStart, onVibeToolCall, setVibeModel, setVibeTheme } = await import("../working-vibes.ts");
 
     const registration = registerFauxProvider({
@@ -642,7 +654,7 @@ test("non-ascii vibe themes generate distinct file paths", async () => {
   process.env.HOME = home;
 
   try {
-    const { fauxAssistantMessage, registerFauxProvider } = await import(FAUX_PROVIDER_PATH);
+    const { fauxAssistantMessage, registerFauxProvider } = await importFauxProviderTools();
     const { generateVibesBatch, initVibeManager, setVibeModel } = await import("../working-vibes.ts");
 
     const registration = registerFauxProvider({
@@ -699,7 +711,7 @@ test("generateVibesBatch preserves provider errors instead of reporting an empty
   process.env.HOME = home;
 
   try {
-    const { fauxAssistantMessage, registerFauxProvider } = await import(FAUX_PROVIDER_PATH);
+    const { fauxAssistantMessage, registerFauxProvider } = await importFauxProviderTools();
     const { generateVibesBatch, initVibeManager, setVibeModel } = await import("../working-vibes.ts");
 
     const registration = registerFauxProvider({
@@ -858,7 +870,7 @@ test("working vibe files refuse symlinked vibe directories", async () => {
     writeFileSync(join(targetDir, "noir.txt"), "Leaked vibe...\n");
     symlinkSync(targetDir, join(home, ".pi", "agent", "vibes"));
 
-    const { fauxAssistantMessage, registerFauxProvider } = await import(FAUX_PROVIDER_PATH);
+    const { fauxAssistantMessage, registerFauxProvider } = await importFauxProviderTools();
     const { generateVibesBatch, getVibeFileCount, hasVibeFile, initVibeManager, setVibeModel } = await import("../working-vibes.ts");
 
     assert.equal(hasVibeFile("noir"), false);
@@ -947,7 +959,7 @@ test("generateVibesBatch creates the vibes directory on first write", async () =
   process.env.HOME = home;
 
   try {
-    const { fauxAssistantMessage, registerFauxProvider } = await import(FAUX_PROVIDER_PATH);
+    const { fauxAssistantMessage, registerFauxProvider } = await importFauxProviderTools();
     const { generateVibesBatch, initVibeManager, setVibeModel } = await import("../working-vibes.ts");
 
     const registration = registerFauxProvider({

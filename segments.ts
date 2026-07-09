@@ -105,11 +105,14 @@ const modelSegment: StatusLineSegment = {
     const icons = getIcons();
     const opts = ctx.options.model ?? {};
 
-    let modelName = sanitizeSegmentText(ctx.model?.name || ctx.model?.id || "no-model");
-    // Strip "Claude " prefix for brevity
-    if (modelName.startsWith("Claude ")) {
+    let modelName = ctx.model?.name || ctx.model?.id || "no-model";
+    if (opts.display === "qualified" && ctx.model?.id) {
+      const provider = ctx.model.provider || ctx.model.providerId || ctx.model.providerName;
+      modelName = provider && !ctx.model.id.includes("/") ? `${provider}/${ctx.model.id}` : ctx.model.id;
+    } else if (modelName.startsWith("Claude ")) {
       modelName = modelName.slice(7);
     }
+    modelName = sanitizeSegmentText(modelName);
 
     let content = withIcon(icons.model, modelName);
 
@@ -326,10 +329,23 @@ const costSegment: StatusLineSegment = {
       return { content: "", visible: false };
     }
 
-    const costDisplay = usingSubscription
-      ? (hasNerdFonts() ? icons.cost : "sub")
-      : `$${cost.toFixed(2)}`;
-    return { content: color(ctx, "cost", costDisplay), visible: true };
+    const reportedCost = cost > 0 ? `$${cost.toFixed(2)}` : null;
+    if (!usingSubscription) {
+      return reportedCost
+        ? { content: color(ctx, "cost", reportedCost), visible: true }
+        : { content: "", visible: false };
+    }
+
+    const subscriptionLabel = hasNerdFonts() ? icons.cost : "(sub)";
+    const subscriptionDisplay = ctx.options.cost?.subscriptionDisplay ?? "subscription";
+    if (subscriptionDisplay === "reported-cost" && reportedCost) {
+      return { content: color(ctx, "cost", reportedCost), visible: true };
+    }
+    if (subscriptionDisplay === "both" && reportedCost) {
+      return { content: color(ctx, "cost", `${reportedCost} ${subscriptionLabel}`), visible: true };
+    }
+
+    return { content: color(ctx, "cost", subscriptionLabel), visible: true };
   },
 };
 

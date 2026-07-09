@@ -5,10 +5,9 @@ import {
   type Theme,
 } from "@earendil-works/pi-coding-agent";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
-import { isKeyRelease, matchesKey, type AutocompleteProvider, type SelectItem, SelectList, truncateToWidth, TUI_KEYBINDINGS, visibleWidth } from "@earendil-works/pi-tui";
+import { isKeyRelease, type AutocompleteProvider, type SelectItem, SelectList, truncateToWidth, TUI_KEYBINDINGS, visibleWidth } from "@earendil-works/pi-tui";
 import { readFileSync, writeFileSync, existsSync, mkdirSync, opendirSync, lstatSync, statSync, renameSync, unlinkSync } from "node:fs";
 import { join, dirname, basename } from "node:path";
-import { homedir } from "node:os";
 
 import type { ColorScheme, SegmentContext, StatusLinePreset, StatusLineSegmentId } from "./types.ts";
 import type { PowerlineConfig } from "./powerline-config.ts";
@@ -25,6 +24,7 @@ import { ManagedShellSession } from "./bash-mode/shell-session.ts";
 import { matchHistoryEntries, readGlobalShellHistory, readProjectHistory, appendProjectHistory } from "./bash-mode/history.ts";
 import type { BashModeSettings } from "./bash-mode/types.ts";
 import { getPreset, PRESETS } from "./presets.ts";
+import { getAgentPath } from "./paths.ts";
 import { collectHiddenExtensionStatusKeys, getNotificationExtensionStatuses, mergeSegmentOptions, mergeSegmentsWithCustomItems, nextPowerlineSettingWithOptions, nextPowerlineSettingWithPreset, parsePowerlineConfig, applyCustomLayout } from "./powerline-config.ts";
 import { getSeparator } from "./separators.ts";
 import { renderSegment } from "./segments.ts";
@@ -36,15 +36,19 @@ import { setNerdFontsPreference } from "./icons.ts";
 import { WelcomeComponent, WelcomeHeader, discoverLoadedCounts, getRecentSessions } from "./welcome.ts";
 import { createWelcomeDismissScheduler } from "./welcome-dismiss.ts";
 import { createRenderScheduler } from "./render-scheduler.ts";
+import { getEditorAutocompleteProvider, passAutocompleteProviderThroughPreviousEditor } from "./editor-composition.ts";
 import { readCoreContextUsage } from "./context-usage.ts";
 import { stripTerminalControlSequences, stripUnsafeTerminalControlSequences } from "./sanitize.ts";
+import { isStaleExtensionContextError, shouldResetExtendedKeyboardModesOnShutdown, shouldRestoreInlineEditorCursorOnShutdown, shouldShowStartupWelcome } from "./lifecycle.ts";
 import { renderFixedEditorCluster, reserveSpinnerSlot, keepSpinnerGlyph, SPINNER_SLOT_RESERVE } from "./fixed-editor/cluster.ts";
-import { emergencyTerminalModeReset, TerminalSplitCompositor } from "./fixed-editor/terminal-split.ts";
+import { DEFAULT_SCROLL_REPAINT_THROTTLE_MS, emergencyTerminalModeReset, TerminalSplitCompositor } from "./fixed-editor/terminal-split.ts";
+import { inlineEditorQuitCursorRestore } from "./terminal-cursor.ts";
 import { fg, rainbow, getDefaultColors } from "./theme.ts";
 import { projectStorageKey } from "./project-key.ts";
 import {
   isSupportedSuperShortcut,
   matchesConfiguredShortcut,
+  matchesStashShortcutInput,
   shortcutConflictKey,
   shortcutUsesSuper,
 } from "./shortcuts.ts";
@@ -78,19 +82,21 @@ let config: PowerlineConfig = parsePowerlineConfig(undefined, Object.keys(PRESET
 const CUSTOM_COMPACTION_STATUS_KEY = "compact-policy";
 let customCompactionEnabled = false;
 
-interface PowerlineShortcuts {
-  stashHistory: string;
-  copyEditor: string;
-  cutEditor: string;
-  jumpPreviousUserMessage: string;
-  jumpNextUserMessage: string;
-  jumpPreviousLlmMessage: string;
-  jumpNextLlmMessage: string;
-  jumpChatBottom: string;
-  scrollChatUp: string;
-  scrollChatDown: string;
-  editorStart: string;
-  editorEnd: string;
+type ShortcutBinding = string | null;
+
+export interface PowerlineShortcuts {
+  stashHistory: ShortcutBinding;
+  copyEditor: ShortcutBinding;
+  cutEditor: ShortcutBinding;
+  jumpPreviousUserMessage: ShortcutBinding;
+  jumpNextUserMessage: ShortcutBinding;
+  jumpPreviousLlmMessage: ShortcutBinding;
+  jumpNextLlmMessage: ShortcutBinding;
+  jumpChatBottom: ShortcutBinding;
+  scrollChatUp: ShortcutBinding;
+  scrollChatDown: ShortcutBinding;
+  editorStart: ShortcutBinding;
+  editorEnd: ShortcutBinding;
 }
 
 type PowerlineShortcutKey = keyof PowerlineShortcuts;
@@ -103,6 +109,7 @@ type ChatJumpShortcutKey = Extract<PowerlineShortcutKey,
 >;
 type ChatJumpRole = "user" | "assistant";
 type ChatJumpDirection = "previous" | "next";
+type ScrollAwayShortcutId = "bottom" | "previousUser" | "nextUser" | "previousAssistant" | "nextAssistant";
 type ChatJumpShortcutAction =
   | { kind: "message"; role: ChatJumpRole; direction: ChatJumpDirection }
   | { kind: "bottom" };
@@ -122,7 +129,7 @@ const PROJECT_PROMPT_HISTORY_MAX_FILE_BYTES = 2 * 1024 * 1024;
 const PROJECT_PROMPT_HISTORY_MAX_TOTAL_BYTES = 16 * 1024 * 1024;
 const PROJECT_PROMPT_HISTORY_MAX_SCAN_ENTRIES = 2000;
 const STASH_PREVIEW_WIDTH = 72;
-const DEFAULT_SHORTCUTS: PowerlineShortcuts = {
+const DEFAULT_SHORTCUTS: Record<PowerlineShortcutKey, string> = {
   stashHistory: "ctrl+alt+h",
   copyEditor: "ctrl+alt+c",
   cutEditor: "ctrl+alt+x",
@@ -130,7 +137,7 @@ const DEFAULT_SHORTCUTS: PowerlineShortcuts = {
   jumpNextUserMessage: "ctrl+shift+i",
   jumpPreviousLlmMessage: "ctrl+alt+,",
   jumpNextLlmMessage: "ctrl+alt+.",
-  jumpChatBottom: "ctrl+shift+g",
+  jumpChatBottom: "ctrl+alt+g",
   scrollChatUp: "super+up",
   scrollChatDown: "super+down",
   editorStart: "super+shift+up",
@@ -349,8 +356,7 @@ function trackPromptHistory(editor: any): void {
 }
 
 function getSettingsPath(): string {
-  const homeDir = process.env.HOME || process.env.USERPROFILE || homedir();
-  return join(homeDir, ".pi", "agent", "settings.json");
+  return getAgentPath("settings.json");
 }
 
 function getProjectSettingsPath(cwd: string): string {
@@ -358,13 +364,11 @@ function getProjectSettingsPath(cwd: string): string {
 }
 
 function getGlobalCompactionPolicyPath(): string {
-  const homeDir = process.env.HOME || process.env.USERPROFILE || homedir();
-  return join(homeDir, ".pi", "agent", "compaction-policy.json");
+  return getAgentPath("compaction-policy.json");
 }
 
 function getCustomCompactionExtensionPath(): string {
-  const homeDir = process.env.HOME || process.env.USERPROFILE || homedir();
-  return join(homeDir, ".pi", "agent", "extensions", "pi-custom-compaction");
+  return getAgentPath("extensions", "pi-custom-compaction");
 }
 
 const UNSAFE_SETTINGS_MERGE_KEYS = new Set(["__proto__", "constructor", "prototype"]);
@@ -534,13 +538,11 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function getStashHistoryPath(): string {
-  const homeDir = process.env.HOME || process.env.USERPROFILE || homedir();
-  return join(homeDir, ".pi", "agent", "powerline-footer", "stash-history.json");
+  return getAgentPath("powerline-footer", "stash-history.json");
 }
 
 function getSessionsPath(): string {
-  const homeDir = process.env.HOME || process.env.USERPROFILE || homedir();
-  return join(homeDir, ".pi", "agent", "sessions");
+  return getAgentPath("sessions");
 }
 
 function getProjectSessionsPath(cwd: string): string {
@@ -867,7 +869,7 @@ function writePowerlinePresetSetting(preset: StatusLinePreset, cwd: string = pro
 
 function writePowerlineOptionSetting(
   cwd: string,
-  updates: Partial<Pick<PowerlineConfig, "mouseScroll" | "fixedEditor">>,
+  updates: Partial<Pick<PowerlineConfig, "mouseScroll" | "fixedEditor" | "welcome" | "stashSharpSShortcut">>,
   currentPreset: StatusLinePreset,
 ): boolean {
   return writePowerlineSetting(cwd, (existingPowerlineSetting) => (
@@ -910,10 +912,6 @@ function sanitizeStyledUiLine(text: string): string {
   return stripUnsafeTerminalControlSequences(text).replace(/[\r\n\t]+/g, " ");
 }
 
-function isStaleExtensionContextError(error: unknown): boolean {
-  return error instanceof Error && error.message.includes("This extension instance is stale");
-}
-
 function getCurrentEditorText(ctx: any, editor: any): string {
   const editorText = editor?.getExpandedText?.();
   if (typeof editorText === "string" && editorText.length > 0) return editorText;
@@ -945,6 +943,15 @@ function normalizeShortcut(value: string): string {
   const modifierRank = new Map(SHORTCUT_MODIFIER_ORDER.map((modifier, index) => [modifier, index]));
   const modifiers = parts.slice(0, -1).sort((a, b) => (modifierRank.get(a) ?? 99) - (modifierRank.get(b) ?? 99));
   return [...modifiers, parts[parts.length - 1]].join("+");
+}
+
+function formatShortcutLabel(shortcut: ShortcutBinding): string | null {
+  return shortcut?.split("+").map((part) => part.toLowerCase() === "super" ? "cmd" : part).join("+") ?? null;
+}
+
+function scrollAwayShortcutEntry(id: ScrollAwayShortcutId, shortcut: ShortcutBinding): { id: ScrollAwayShortcutId; shortcutLabel: string } | null {
+  const shortcutLabel = formatShortcutLabel(shortcut);
+  return shortcutLabel ? { id, shortcutLabel } : null;
 }
 
 function reservedShortcuts(): Set<string> {
@@ -1021,15 +1028,46 @@ function shortcutUsageKey(shortcut: string): string {
   return shortcutConflictKey(normalizeShortcut(shortcut));
 }
 
-function findShortcutReplacement(key: PowerlineShortcutKey, used: Set<string>): string | null {
+function parseShortcutSetting(value: unknown): ShortcutBinding | undefined {
+  if (value === null || value === undefined) return null;
+  if (typeof value === "string" && value.trim() === "") return null;
+  return parseShortcutOverride(value) ?? undefined;
+}
+
+function fixedEditorScrollAliasUsageKey(shortcut: string): "super+up" | "super+down" | null {
+  switch (normalizeShortcut(shortcut)) {
+    case "super+up":
+    case "super+home":
+    case "super+pageup":
+    case "ctrl+shift+up":
+    case "pageup":
+      return "super+up";
+    case "super+down":
+    case "super+end":
+    case "super+pagedown":
+    case "ctrl+shift+down":
+    case "pagedown":
+      return "super+down";
+    default:
+      return null;
+  }
+}
+
+function conflictsWithEnabledScrollAlias(key: PowerlineShortcutKey, shortcut: string, resolved: PowerlineShortcuts): boolean {
+  const usageKey = fixedEditorScrollAliasUsageKey(shortcut);
+  return (key !== "scrollChatUp" && resolved.scrollChatUp !== null && usageKey === "super+up")
+    || (key !== "scrollChatDown" && resolved.scrollChatDown !== null && usageKey === "super+down");
+}
+
+function findShortcutReplacement(key: PowerlineShortcutKey, used: Set<string>, resolved: PowerlineShortcuts): string | null {
   const preferred = DEFAULT_SHORTCUTS[key];
-  if (!used.has(shortcutUsageKey(preferred))) {
+  if (!used.has(shortcutUsageKey(preferred)) && !conflictsWithEnabledScrollAlias(key, preferred, resolved)) {
     return preferred;
   }
 
   for (const shortcutKey of SHORTCUT_KEYS) {
     const candidate = DEFAULT_SHORTCUTS[shortcutKey];
-    if (!used.has(shortcutUsageKey(candidate))) {
+    if (!used.has(shortcutUsageKey(candidate)) && !conflictsWithEnabledScrollAlias(key, candidate, resolved)) {
       return candidate;
     }
   }
@@ -1037,39 +1075,53 @@ function findShortcutReplacement(key: PowerlineShortcutKey, used: Set<string>): 
   return null;
 }
 
-function getBashModeToggleShortcutCandidate(settings: Record<string, unknown>): string {
+function bashToggleShortcutReservation(settings: Record<string, unknown>): ShortcutBinding {
   const raw = isRecord(settings.bashMode) ? settings.bashMode : {};
-  return parseShortcutOverride(raw.toggleShortcut) ?? DEFAULT_BASH_MODE_SETTINGS.toggleShortcut;
+  if (!Object.prototype.hasOwnProperty.call(raw, "toggleShortcut")) {
+    return DEFAULT_BASH_MODE_SETTINGS.toggleShortcut;
+  }
+
+  const parsed = parseShortcutSetting(raw.toggleShortcut);
+  return parsed === undefined ? DEFAULT_BASH_MODE_SETTINGS.toggleShortcut : parsed;
 }
 
-function resolveShortcutConfig(settings: Record<string, unknown>, extraReservedShortcuts: readonly string[] = []): PowerlineShortcuts {
+export function resolveShortcutConfig(settings: Record<string, unknown>): PowerlineShortcuts {
   const resolved: PowerlineShortcuts = { ...DEFAULT_SHORTCUTS };
   const shortcutSettings = settings.powerlineShortcuts;
 
   if (isRecord(shortcutSettings)) {
     for (const key of SHORTCUT_KEYS) {
-      const override = parseShortcutOverride(shortcutSettings[key]);
-      if (override) {
+      if (!Object.prototype.hasOwnProperty.call(shortcutSettings, key)) {
+        continue;
+      }
+
+      const override = parseShortcutSetting(shortcutSettings[key]);
+      if (override !== undefined) {
         resolved[key] = override;
       }
     }
   }
 
   const used = new Set(Array.from(reservedShortcuts(), shortcutUsageKey));
-  for (const shortcut of extraReservedShortcuts) {
-    used.add(shortcutUsageKey(shortcut));
+  const reservedBashToggle = bashToggleShortcutReservation(settings);
+  if (reservedBashToggle) {
+    used.add(shortcutUsageKey(reservedBashToggle));
   }
 
   for (const key of SHORTCUT_KEYS) {
     const configured = resolved[key];
+    if (configured === null) {
+      continue;
+    }
+
     const configuredUsageKey = shortcutUsageKey(configured);
 
-    if (!used.has(configuredUsageKey)) {
+    if (!used.has(configuredUsageKey) && !conflictsWithEnabledScrollAlias(key, configured, resolved)) {
       used.add(configuredUsageKey);
       continue;
     }
 
-    const replacement = findShortcutReplacement(key, used);
+    const replacement = findShortcutReplacement(key, used, resolved);
     if (!replacement) {
       console.debug(`[powerline-footer] Shortcut conflict for ${key}: "${configured}" is already in use`);
       continue;
@@ -1086,27 +1138,34 @@ function resolveShortcutConfig(settings: Record<string, unknown>, extraReservedS
   return resolved;
 }
 
-function parseBashModeSettings(settings: Record<string, unknown>, powerlineShortcuts?: PowerlineShortcuts): BashModeSettings {
+export function parseBashModeSettings(settings: Record<string, unknown>, powerlineShortcuts?: PowerlineShortcuts): BashModeSettings {
   const raw = isRecord(settings.bashMode) ? settings.bashMode : {};
-
-  const configuredToggleShortcut = parseShortcutOverride(raw.toggleShortcut);
-  const candidateToggleShortcut = configuredToggleShortcut ?? DEFAULT_BASH_MODE_SETTINGS.toggleShortcut;
   const used = new Set(Array.from(reservedShortcuts(), shortcutUsageKey));
   if (powerlineShortcuts) {
-    for (const key of SHORTCUT_KEYS) {
-      used.add(shortcutUsageKey(powerlineShortcuts[key]));
+    for (const shortcut of Object.values(powerlineShortcuts)) {
+      if (shortcut) {
+        used.add(shortcutUsageKey(shortcut));
+      }
     }
   }
-  const defaultToggleAvailable = !used.has(shortcutUsageKey(DEFAULT_BASH_MODE_SETTINGS.toggleShortcut));
-  const toggleShortcut = !used.has(shortcutUsageKey(candidateToggleShortcut))
-    ? candidateToggleShortcut
-    : defaultToggleAvailable
-      ? DEFAULT_BASH_MODE_SETTINGS.toggleShortcut
-      : candidateToggleShortcut;
 
-  if (toggleShortcut !== candidateToggleShortcut) {
+  const configuredToggleShortcut = Object.prototype.hasOwnProperty.call(raw, "toggleShortcut")
+    ? parseShortcutSetting(raw.toggleShortcut)
+    : undefined;
+  const fallbackToggleShortcut = used.has(shortcutUsageKey(DEFAULT_BASH_MODE_SETTINGS.toggleShortcut))
+    ? null
+    : DEFAULT_BASH_MODE_SETTINGS.toggleShortcut;
+  const toggleShortcut = configuredToggleShortcut === null
+    ? null
+    : configuredToggleShortcut
+      && !used.has(shortcutUsageKey(configuredToggleShortcut))
+      && (!powerlineShortcuts || !conflictsWithEnabledScrollAlias("stashHistory", configuredToggleShortcut, powerlineShortcuts))
+      ? configuredToggleShortcut
+      : fallbackToggleShortcut;
+
+  if (configuredToggleShortcut && toggleShortcut !== configuredToggleShortcut) {
     console.debug(
-      `[powerline-footer] Bash mode shortcut conflict: "${candidateToggleShortcut}" replaced with "${toggleShortcut}"`,
+      `[powerline-footer] Bash mode shortcut conflict: "${configuredToggleShortcut}" replaced with "${toggleShortcut ?? "disabled"}"`,
     );
   }
   const transcriptMaxLines = typeof raw.transcriptMaxLines === "number" && Number.isFinite(raw.transcriptMaxLines)
@@ -1663,8 +1722,7 @@ export default function powerlineFooter(pi: ExtensionAPI) {
   const startupSettings = readSettings();
   config = parsePowerlineConfig(startupSettings.powerline, PRESET_NAMES);
   setNerdFontsPreference(config.nerdFonts);
-  let bashToggleShortcutCandidate = getBashModeToggleShortcutCandidate(startupSettings);
-  let resolvedShortcuts = resolveShortcutConfig(startupSettings, [bashToggleShortcutCandidate]);
+  let resolvedShortcuts = resolveShortcutConfig(startupSettings);
   let bashModeSettings = parseBashModeSettings(startupSettings, resolvedShortcuts);
 
   let enabled = true;
@@ -1999,8 +2057,7 @@ export default function powerlineFooter(pi: ExtensionAPI) {
     stashedEditorText = null;
 
     const settings = readSettings(ctx.cwd);
-    bashToggleShortcutCandidate = getBashModeToggleShortcutCandidate(settings);
-    resolvedShortcuts = resolveShortcutConfig(settings, [bashToggleShortcutCandidate]);
+    resolvedShortcuts = resolveShortcutConfig(settings);
     bashModeSettings = parseBashModeSettings(settings, resolvedShortcuts);
     registerCurrentShortcutBindings();
     showLastPrompt = settings.showLastPrompt !== false;
@@ -2027,7 +2084,7 @@ export default function powerlineFooter(pi: ExtensionAPI) {
     
     if (enabled && ctx.hasUI) {
       setupCustomEditor(ctx);
-      if (event.reason === "startup") {
+      if (shouldShowStartupWelcome(event.reason, config.welcome)) {
         if (settings.quietStartup === true) {
           setupWelcomeHeader(ctx);
         } else {
@@ -2041,11 +2098,11 @@ export default function powerlineFooter(pi: ExtensionAPI) {
   });
 
   pi.on("session_shutdown", async (event) => {
-    // When switching sessions (resume/new/fork), preserve keyboard modes
-    // (Kitty protocol, modifyOtherKeys) so that Shift+Enter and other
-    // modified keys continue to work. Only reset on quit/reload where
-    // the terminal should be restored to a clean state.
-    const isTerminalExit = event?.reason === "quit" || event?.reason === "reload";
+    // When switching sessions or reloading, preserve keyboard modes (Kitty
+    // protocol, modifyOtherKeys) so Shift+Enter and other modified keys keep
+    // working after the next session starts. Only a real quit should hard-reset
+    // the terminal back to plain keyboard mode.
+    const isTerminalExit = shouldResetExtendedKeyboardModesOnShutdown(event?.reason);
 
     sessionGeneration++;
     dismissWelcomeOverlay?.();
@@ -2057,7 +2114,18 @@ export default function powerlineFooter(pi: ExtensionAPI) {
     cancelUserBashGitRefreshTimers();
     restoreFooterStatusRepaintHook?.();
     restoreFooterStatusRepaintHook = null;
-    teardownFixedEditorCompositor(isTerminalExit ? { resetExtendedKeyboardModes: true } : undefined);
+    const hadFixedEditorCompositor = teardownFixedEditorCompositor(isTerminalExit ? { resetExtendedKeyboardModes: true } : undefined);
+    if (shouldRestoreInlineEditorCursorOnShutdown(event?.reason, config.fixedEditor, hadFixedEditorCompositor)) {
+      try {
+        process.stdout.write(inlineEditorQuitCursorRestore({
+          rows: tuiRef?.terminal?.rows ?? process.stdout.rows,
+          cursorRow: tuiRef?.cursorRow,
+          previousViewportTop: tuiRef?.previousViewportTop,
+        }));
+      } catch (error) {
+        console.debug("[powerline-footer] Failed to restore inline editor cursor on quit:", error);
+      }
+    }
     stashShortcutInputUnsubscribe?.();
     stashShortcutInputUnsubscribe = null;
     shellSession?.dispose();
@@ -2381,15 +2449,7 @@ export default function powerlineFooter(pi: ExtensionAPI) {
   }
 
   function isStashShortcutInput(data: string): boolean {
-    if (isKeyRelease(data)) return false;
-
-    return data === "ß"
-      || data === "\x1bs"
-      || data === "\x1bS"
-      || /^\x1b\[(?:83|115)(?::\d*)?(?::\d*)?;3(?::\d+)?u$/.test(data)
-      || data === "\x1b[27;3;115~"
-      || data === "\x1b[27;3;83~"
-      || matchesKey(data, "alt+s");
+    return matchesStashShortcutInput(data, { includePrintableSharpS: config.stashSharpSShortcut });
   }
 
   function getChatJumpShortcutAction(data: string): ChatJumpShortcutAction | null {
@@ -2520,20 +2580,37 @@ export default function powerlineFooter(pi: ExtensionAPI) {
   pi.on("agent_end", async (_event, ctx) => {
     isStreaming = false;
     liveAssistantUsage = null;
+
+    let hasUI = false;
+    try {
+      hasUI = Boolean(ctx.hasUI);
+    } catch (error) {
+      if (!isStaleExtensionContextError(error)) throw error;
+      currentCtx = null;
+      return;
+    }
+
     currentCtx = ctx;
-    if (ctx.hasUI) {
-      onVibeAgentEnd((message) => ctx.ui.setWorkingMessage(message)); // working-vibes internal state + reset message
-      if (stashedEditorText !== null) {
-        if (ctx.ui.getEditorText().trim() === "") {
-          ctx.ui.setEditorText(stashedEditorText);
-          stashedEditorText = null;
-          ctx.ui.setStatus("stash", undefined);
-          ctx.ui.notify("Stash restored", "info");
-        } else {
-          ctx.ui.notify("Stash preserved — clear editor then Alt+S to restore", "info");
+    try {
+      if (hasUI) {
+        onVibeAgentEnd((message) => ctx.ui.setWorkingMessage(message)); // working-vibes internal state + reset message
+        if (stashedEditorText !== null) {
+          if (ctx.ui.getEditorText().trim() === "") {
+            ctx.ui.setEditorText(stashedEditorText);
+            stashedEditorText = null;
+            ctx.ui.setStatus("stash", undefined);
+            ctx.ui.notify("Stash restored", "info");
+          } else {
+            ctx.ui.notify("Stash preserved — clear editor then Alt+S to restore", "info");
+          }
         }
       }
+    } catch (error) {
+      if (!isStaleExtensionContextError(error)) throw error;
+      currentCtx = null;
+      return;
     }
+
     requestStatusRender();
   });
 
@@ -2706,17 +2783,21 @@ export default function powerlineFooter(pi: ExtensionAPI) {
   // instead of going inert.
   const registeredShortcutActions = new Map<string, PowerlineShortcutAction>();
 
+  function shortcutMatchesBinding(key: string, shortcut: ShortcutBinding): boolean {
+    return shortcut !== null && key === shortcutUsageKey(shortcut);
+  }
+
   function getRegisteredShortcutAction(shortcut: string): PowerlineShortcutAction | null {
     const key = shortcutUsageKey(shortcut);
 
     if (key === shortcutUsageKey("alt+s")) return { kind: "stashEditor" };
-    if (key === shortcutUsageKey(bashModeSettings.toggleShortcut)) return { kind: "bashMode" };
-    if (key === shortcutUsageKey(resolvedShortcuts.stashHistory)) return { kind: "stashHistory" };
-    if (key === shortcutUsageKey(resolvedShortcuts.copyEditor)) return { kind: "copyEditor" };
-    if (key === shortcutUsageKey(resolvedShortcuts.cutEditor)) return { kind: "cutEditor" };
+    if (shortcutMatchesBinding(key, bashModeSettings.toggleShortcut)) return { kind: "bashMode" };
+    if (shortcutMatchesBinding(key, resolvedShortcuts.stashHistory)) return { kind: "stashHistory" };
+    if (shortcutMatchesBinding(key, resolvedShortcuts.copyEditor)) return { kind: "copyEditor" };
+    if (shortcutMatchesBinding(key, resolvedShortcuts.cutEditor)) return { kind: "cutEditor" };
 
     for (const { shortcutKey, action } of CHAT_JUMP_SHORTCUTS) {
-      if (key === shortcutUsageKey(resolvedShortcuts[shortcutKey])) {
+      if (shortcutMatchesBinding(key, resolvedShortcuts[shortcutKey])) {
         return { kind: "chat", action };
       }
     }
@@ -2726,7 +2807,8 @@ export default function powerlineFooter(pi: ExtensionAPI) {
     return registeredShortcutActions.get(key) ?? null;
   }
 
-  function registerDynamicShortcut(shortcut: string, description: string, action: PowerlineShortcutAction): void {
+  function registerDynamicShortcut(shortcut: ShortcutBinding, description: string, action: PowerlineShortcutAction): void {
+    if (shortcut === null) return;
     registeredShortcutActions.set(shortcutUsageKey(shortcut), action);
     pi.registerShortcut(shortcut, {
       description,
@@ -3116,7 +3198,7 @@ export default function powerlineFooter(pi: ExtensionAPI) {
     return [truncateToWidth(line, width, "…")];
   }
 
-  function teardownFixedEditorCompositor(options?: { resetExtendedKeyboardModes?: boolean }) {
+  function teardownFixedEditorCompositor(options?: { resetExtendedKeyboardModes?: boolean }): boolean {
     const hadCompositor = fixedEditorCompositor !== null;
     fixedEditorCompositor?.dispose(options);
     if (!hadCompositor && options?.resetExtendedKeyboardModes) {
@@ -3131,6 +3213,7 @@ export default function powerlineFooter(pi: ExtensionAPI) {
     fixedEditorContainer = null;
     fixedWidgetContainerAbove = null;
     fixedWidgetContainerBelow = null;
+    return hadCompositor;
   }
 
   function findContainerWithChild(tui: any, child: any): { container: any; index: number } | null {
@@ -3187,6 +3270,17 @@ export default function powerlineFooter(pi: ExtensionAPI) {
       keyboardScrollShortcuts: {
         up: resolvedShortcuts.scrollChatUp,
         down: resolvedShortcuts.scrollChatDown,
+      },
+      scrollRepaintThrottleMs: DEFAULT_SCROLL_REPAINT_THROTTLE_MS,
+      scrollAwayNavigationCard: {
+        shortcuts: [
+          scrollAwayShortcutEntry("bottom", resolvedShortcuts.jumpChatBottom),
+          scrollAwayShortcutEntry("previousUser", resolvedShortcuts.jumpPreviousUserMessage),
+          scrollAwayShortcutEntry("nextUser", resolvedShortcuts.jumpNextUserMessage),
+          scrollAwayShortcutEntry("previousAssistant", resolvedShortcuts.jumpPreviousLlmMessage),
+          scrollAwayShortcutEntry("nextAssistant", resolvedShortcuts.jumpNextLlmMessage),
+        ].filter((shortcut): shortcut is { id: ScrollAwayShortcutId; shortcutLabel: string } => shortcut !== null),
+        onClickBottom: resolvedShortcuts.jumpChatBottom ? () => jumpChatToBottom(ctx) : undefined,
       },
       onCopySelection: (text) => void copyTextToClipboard(ctx, text),
       getShowHardwareCursor: () => typeof tui.getShowHardwareCursor === "function" && tui.getShowHardwareCursor(),
@@ -3300,17 +3394,17 @@ export default function powerlineFooter(pi: ExtensionAPI) {
     return [...new Set(targets)].sort((a, b) => a - b);
   }
 
-  function jumpToChatMessage(ctx: any, role: ChatJumpRole, direction: ChatJumpDirection): void {
+  function jumpToChatMessage(ctx: any, role: ChatJumpRole, direction: ChatJumpDirection): boolean {
     if (!fixedEditorCompositor) {
       ctx.ui.notify("Chat message jumps require /powerline fixed-editor on", "warning");
-      return;
+      return false;
     }
 
     const targets = collectChatMessageStartLines(role);
     const label = role === "assistant" ? "LLM" : "user";
     if (targets.length === 0) {
       ctx.ui.notify(`No ${label} messages found`, "info");
-      return;
+      return false;
     }
 
     const jumped = direction === "previous"
@@ -3318,16 +3412,19 @@ export default function powerlineFooter(pi: ExtensionAPI) {
       : fixedEditorCompositor.jumpToNextRootTarget(targets);
     if (!jumped) {
       ctx.ui.notify(`No ${direction} ${label} message`, "info");
+      return false;
     }
+
+    return true;
   }
 
-  function jumpChatToBottom(ctx: any): void {
+  function jumpChatToBottom(ctx: any): boolean {
     if (!fixedEditorCompositor) {
       ctx.ui.notify("Chat bottom jump requires /powerline fixed-editor on", "warning");
-      return;
+      return false;
     }
 
-    fixedEditorCompositor.jumpToRootBottom();
+    return fixedEditorCompositor.jumpToRootBottom();
   }
 
   function followSubmittedEditorToBottom(): void {
@@ -3460,18 +3557,16 @@ export default function powerlineFooter(pi: ExtensionAPI) {
         },
       });
 
-      const getEditorAutocompleteProvider = (sourceEditor: unknown): AutocompleteProvider | undefined => {
-        const candidate = sourceEditor && typeof sourceEditor === "object" ? Reflect.get(sourceEditor, "autocompleteProvider") : null;
-        if (!candidate || typeof candidate !== "object") {
-          return undefined;
+      let installingPowerlineAutocompleteProvider = false;
+      const originalSetAutocompleteProvider = editor.setAutocompleteProvider.bind(editor);
+      editor.setAutocompleteProvider = (provider: AutocompleteProvider) => {
+        if (installingPowerlineAutocompleteProvider) {
+          originalSetAutocompleteProvider(provider);
+          return;
         }
-        if (typeof Reflect.get(candidate, "getSuggestions") !== "function") {
-          return undefined;
-        }
-        if (typeof Reflect.get(candidate, "applyCompletion") !== "function") {
-          return undefined;
-        }
-        return candidate;
+
+        originalSetAutocompleteProvider(passAutocompleteProviderThroughPreviousEditor(provider, previousEditor));
+        attachAutocompleteProvider();
       };
 
       const getInstalledAutocompleteProvider = (): AutocompleteProvider | undefined => {
@@ -3485,9 +3580,14 @@ export default function powerlineFooter(pi: ExtensionAPI) {
 
         const bashProvider = new BashAutocompleteProvider();
         const oneOffBashProvider = new OneOffBashAutocompleteProvider();
-        editor.installAutocompleteProvider(
-          new ModeAwareAutocompleteProvider(defaultProvider, bashProvider, oneOffBashProvider, () => bashModeActive),
-        );
+        installingPowerlineAutocompleteProvider = true;
+        try {
+          editor.installAutocompleteProvider(
+            new ModeAwareAutocompleteProvider(defaultProvider, bashProvider, oneOffBashProvider, () => bashModeActive),
+          );
+        } finally {
+          installingPowerlineAutocompleteProvider = false;
+        }
         return true;
       };
 
