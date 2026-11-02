@@ -27,9 +27,9 @@ import { getPreset, PRESETS } from "./presets.ts";
 import { getAgentPath } from "./paths.ts";
 import { collectHiddenExtensionStatusKeys, getNotificationExtensionStatuses, mergeSegmentOptions, mergeSegmentsWithCustomItems, nextPowerlineSettingWithOptions, nextPowerlineSettingWithPreset, parsePowerlineConfig } from "./powerline-config.ts";
 import { getSeparator } from "./separators.ts";
-import { setNerdFontsPreference } from "./icons.ts";
+import { getIcons, setNerdFontsPreference } from "./icons.ts";
 import { buildPillUnits, DEFAULT_PILL_BACKGROUND, wrapInPillGroup } from "./pills.ts";
-import { renderSegment } from "./segments.ts";
+import { formatDuration, renderSegment } from "./segments.ts";
 import { resolveThinkingLevelSelection } from "./thinking-level.ts";
 import { getGitStatus, invalidateGitStatus, invalidateGitBranch, subscribeGitUpdates } from "./git-status.ts";
 import { SessionUsageCache } from "./token-stats.ts";
@@ -1279,6 +1279,7 @@ export default function powerlineFooter(pi: ExtensionAPI) {
   let approximateContextUsage: CoreContextUsage | null = null;
   let isStreaming = false;
   let tuiRef: any = null;
+  let workingStatusTimer: ReturnType<typeof setInterval> | null = null;
   let restoreFooterStatusRepaintHook: (() => void) | null = null;
   let stashShortcutInputUnsubscribe: (() => void) | null = null;
   let dismissWelcomeOverlay: (() => void) | null = null;
@@ -1370,6 +1371,18 @@ export default function powerlineFooter(pi: ExtensionAPI) {
     forceNextLayoutRecompute = true;
     statusRenderScheduler.cancel();
     statusRenderScheduler.schedule(0);
+  };
+
+  const stopWorkingStatusTimer = () => {
+    if (workingStatusTimer !== null) {
+      clearInterval(workingStatusTimer);
+      workingStatusTimer = null;
+    }
+  };
+
+  const startWorkingStatusTimer = () => {
+    stopWorkingStatusTimer();
+    workingStatusTimer = setInterval(() => tuiRef?.requestRender(), 1000);
   };
 
   const installFooterStatusRepaintHook = (footerData: ReadonlyFooterDataProvider) => {
@@ -1889,6 +1902,7 @@ export default function powerlineFooter(pi: ExtensionAPI) {
   // Track session start
   pi.on("session_start", async (event, ctx) => {
     dismissWelcome(ctx);
+    stopWorkingStatusTimer();
     shellSession?.dispose();
     shellSession = null;
     sessionGeneration++;
@@ -1952,6 +1966,7 @@ export default function powerlineFooter(pi: ExtensionAPI) {
   });
 
   pi.on("session_shutdown", async (event, ctx) => {
+    stopWorkingStatusTimer();
     try {
       if (event.reason === "reload") {
         transferActiveStashReload(ctx, stashedEditorText);
@@ -2132,6 +2147,7 @@ export default function powerlineFooter(pi: ExtensionAPI) {
   // Also dismiss welcome when agent starts responding (handles `p "command"` case)
   pi.on("agent_start", async (_event, ctx) => {
     isStreaming = true;
+    startWorkingStatusTimer();
     liveAssistantUsage = null;
     onVibeAgentStart();
     dismissWelcome(ctx);
@@ -2516,6 +2532,7 @@ export default function powerlineFooter(pi: ExtensionAPI) {
 
   pi.on("agent_end", async (_event, ctx) => {
     isStreaming = false;
+    stopWorkingStatusTimer();
     liveAssistantUsage = null;
     coreContextUsageCache.reset();
 
@@ -3313,6 +3330,9 @@ export default function powerlineFooter(pi: ExtensionAPI) {
       const editor = new BashModeEditor(tui, editorTheme, keybindings, {
         keybindings,
         embedWorkingStatus: config.workingIndicatorPlacement === "editor-border",
+        getWorkingStatusSuffix: () => isStreaming
+          ? `${getIcons().time} ${formatDuration(Date.now() - sessionStartTime)}`
+          : undefined,
         isBashModeActive: () => bashModeActive,
         isShellRunning: () => shellSession?.state.running ?? false,
         onExitBashMode: () => {

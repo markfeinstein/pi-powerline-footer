@@ -30,7 +30,7 @@ function formatTokens(n: number): string {
   return `${Math.round(n / 1000000)}M`;
 }
 
-function formatDuration(ms: number): string {
+export function formatDuration(ms: number): string {
   const seconds = Math.floor(ms / 1000);
   const minutes = Math.floor(seconds / 60);
   const hours = Math.floor(minutes / 60);
@@ -396,19 +396,21 @@ const costSegment: StatusLineSegment = {
   render(ctx) {
     const cost = ctx.usageStats.cost + (ctx.usageStats.subagentCost ?? 0);
     const usingSubscription = ctx.usingSubscription;
+    const subscriptionDisplay = ctx.options.cost?.subscriptionDisplay ?? "subscription";
 
     if (!cost && !usingSubscription) {
       return { content: "", visible: false };
     }
 
-    const reportedCost = cost > 0 ? formatUsdCost(cost, ctx.options.cost?.currency) : null;
+    const reportedCost = cost > 0 || subscriptionDisplay === "reported-cost"
+      ? formatUsdCost(cost, ctx.options.cost?.currency)
+      : null;
     if (!usingSubscription) {
       return reportedCost
         ? { content: color(ctx, "cost", reportedCost), visible: true }
         : { content: "", visible: false };
     }
 
-    const subscriptionDisplay = ctx.options.cost?.subscriptionDisplay ?? "subscription";
     if (subscriptionDisplay === "reported-cost" && reportedCost) {
       return { content: color(ctx, "cost", reportedCost), visible: true };
     }

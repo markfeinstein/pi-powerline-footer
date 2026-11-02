@@ -13,6 +13,7 @@ interface EditorBoundaryShortcuts {
 interface BashModeEditorOptions {
   keybindings: KeybindingsManager;
   embedWorkingStatus?: boolean;
+  getWorkingStatusSuffix?: () => string | undefined;
   isBashModeActive: () => boolean;
   isShellRunning: () => boolean;
   onExitBashMode: () => void;
@@ -105,6 +106,22 @@ function resetShellHistoryBrowse(state: object): void {
   Reflect.set(state, "shellHistoryDraft", "");
 }
 
+/** Insert a compact suffix into the trailing rule of an embedded editor border. */
+export function appendWorkingStatusSuffix(line: string, suffix: string): string {
+  const reset = /\x1b\[[0-9;]*m$/.exec(line)?.[0] ?? "";
+  const withoutReset = reset ? line.slice(0, -reset.length) : line;
+  const trailingRule = /─+$/.exec(withoutReset);
+  if (!trailingRule || trailingRule.index === undefined) return line;
+
+  const label = ` ${suffix} `;
+  const labelWidth = visibleWidth(label);
+  const ruleWidth = trailingRule[0].length;
+  if (ruleWidth <= labelWidth) return line;
+
+  const remainingRule = "─".repeat(ruleWidth - labelWidth);
+  return `${withoutReset.slice(0, trailingRule.index)}${label}${remainingRule}${reset}`;
+}
+
 export class BashModeEditor extends CustomEditor {
   private readonly keybindingsRef: KeybindingsManager;
   private readonly optionsRef: BashModeEditorOptions;
@@ -140,7 +157,9 @@ export class BashModeEditor extends CustomEditor {
   renderEmbeddedTopBorder(width: number): string | null {
     if (!this.embedWorkingStatus || Reflect.get(this, "workingStatusIndicator") == null) return null;
     const scrollOffset = Reflect.get(this, "scrollOffset");
-    return this.renderTopBorder(width, typeof scrollOffset === "number" ? scrollOffset : 0);
+    const line = this.renderTopBorder(width, typeof scrollOffset === "number" ? scrollOffset : 0);
+    const suffix = this.optionsRef.getWorkingStatusSuffix?.();
+    return suffix ? appendWorkingStatusSuffix(line, suffix) : line;
   }
 
   setAutocompleteProvider(provider: AutocompleteProvider): void {

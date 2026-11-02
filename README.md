@@ -264,7 +264,7 @@ Padding does not change segment-internal spacing, separators, or editor, transcr
 
 By default, segments that don't fit on the secondary line are dropped. Set `"secondaryOverflow": "wrap"` in `powerline` to continue them on extra lines below instead. A single segment wider than the terminal is still hidden. The default is `"drop"`.
 
-Pi's working, compaction, summarization, and retry indicators appear in the editor's top border by default. Set `"workingIndicatorPlacement": "above-powerline"` to show them on Pi's separate status row above the Powerline bar and editor instead. Working Vibes messages follow the same placement. The default is `"editor-border"`.
+Pi's working, compaction, summarization, and retry indicators appear in the editor's top border by default. Set `"workingIndicatorPlacement": "above-powerline"` to show them on Pi's separate status row above the Powerline bar and editor instead. Working Vibes messages follow the same placement. The default is `"editor-border"`. When the default embedded border is active, `time_spent` can share that row as a compact elapsed-session timer.
 
 ```json
 {
@@ -306,7 +306,7 @@ Subscription cost display accepts:
 | Mode | Subscription + reported cost | Subscription + no reported cost |
 |------|------------------------------|----------------------------------|
 | `subscription` | `(sub)` | `(sub)` |
-| `reported-cost` | `$0.12` | `(sub)` |
+| `reported-cost` | `$0.12` | `$0.00` |
 | `both` | `$0.12 (sub)` | `(sub)` |
 
 Segment display formats (opt-in; defaults match the historical rendering):

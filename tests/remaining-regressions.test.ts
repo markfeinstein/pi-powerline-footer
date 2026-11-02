@@ -186,7 +186,7 @@ test("cost segment supports subscription display modes and converted currencies"
   assert.deepEqual(subscription, { content: "(sub)", visible: true });
   assert.deepEqual(reportedCost, { content: "$0.42", visible: true });
   assert.deepEqual(both, { content: "$0.42 (sub)", visible: true });
-  assert.deepEqual(zeroReported, { content: "(sub)", visible: true });
+  assert.deepEqual(zeroReported, { content: "$0.00", visible: true });
   assert.deepEqual(zeroBoth, { content: "(sub)", visible: true });
   assert.deepEqual(withSubagentCost, { content: "$1.00", visible: true });
   assert.deepEqual(convertedCurrency, { content: "¥9.00", visible: true });
