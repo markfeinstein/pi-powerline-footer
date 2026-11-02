@@ -23,7 +23,7 @@ Customizes the default [pi](https://github.com/badlogic/pi-mono) editor with a p
 
 **Powerline placement** — The primary Powerline row can be shown above or below the editor.
 
-**Rounded pill layout** — Render individual or grouped segments as truecolor capsules with Nerd Font half-circle caps, per-segment backgrounds, optional foreground overrides, and bold text.
+**Rounded pill layout** — Render individual or grouped segments as truecolor capsules with Nerd Font half-circle caps, per-segment backgrounds, optional foreground overrides, bold text, and responsive trimming of grouped content before overflow is dropped.
 
 **Native Pi layout** — Pi owns fixed input, feed scrolling, selection, and terminal behavior; this extension supplies powerline widgets and the custom bash/stash/editor integrations.
 

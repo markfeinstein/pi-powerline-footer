@@ -28,7 +28,7 @@ import { getAgentPath } from "./paths.ts";
 import { collectHiddenExtensionStatusKeys, getNotificationExtensionStatuses, mergeSegmentOptions, mergeSegmentsWithCustomItems, nextPowerlineSettingWithOptions, nextPowerlineSettingWithPreset, parsePowerlineConfig } from "./powerline-config.ts";
 import { getSeparator } from "./separators.ts";
 import { getIcons, setNerdFontsPreference } from "./icons.ts";
-import { buildPillUnits, DEFAULT_PILL_BACKGROUND, wrapInPillGroup } from "./pills.ts";
+import { buildPillUnits, DEFAULT_PILL_BACKGROUND, type PillSegment, wrapInPillGroup } from "./pills.ts";
 import { formatDuration, renderSegment } from "./segments.ts";
 import { resolveThinkingLevelSelection } from "./thinking-level.ts";
 import { getGitStatus, invalidateGitStatus, invalidateGitBranch, subscribeGitUpdates } from "./git-status.ts";
@@ -1113,7 +1113,7 @@ function renderSegmentWithWidth(
   return { content: rendered.content, width: visibleWidth(rendered.content), visible: true };
 }
 
-type RenderedStatusUnit = { content: string; width: number };
+type RenderedStatusUnit = { content: string; width: number; pillParts?: readonly PillSegment[] };
 
 function buildRenderedStatusUnits(
   parts: readonly { id: string; content: string; width: number }[],
@@ -1129,10 +1129,24 @@ function buildRenderedStatusUnits(
     config.pillBackground,
     config.pillTextColors,
     config.pillForeground,
-  ).map((unit) => {
-    const content = wrapInPillGroup(unit, config.bold);
-    return { content, width: visibleWidth(content) };
+  ).map((pillParts) => {
+    const content = wrapInPillGroup(pillParts, config.bold);
+    return { content, width: visibleWidth(content), pillParts };
   });
+}
+
+function fitRenderedStatusUnit(unit: RenderedStatusUnit, maxWidth: number): RenderedStatusUnit | null {
+  if (unit.width <= maxWidth) return unit;
+  if (!unit.pillParts || unit.pillParts.length < 2) return null;
+
+  for (let count = unit.pillParts.length - 1; count > 0; count--) {
+    const pillParts = unit.pillParts.slice(0, count);
+    const content = wrapInPillGroup(pillParts, config.bold);
+    const width = visibleWidth(content);
+    if (width <= maxWidth) return { content, width, pillParts };
+  }
+
+  return null;
 }
 
 /** Build one status row from pre-rendered segments or pill units. */
@@ -1153,7 +1167,8 @@ type ResponsiveLayout = { topContent: string; secondaryLines: string[] };
 
 /**
  * Responsive segment layout - fits segments into the top bar and overflows to
- * secondary rows. A configured pill group is kept together as one layout unit.
+ * secondary rows. A configured pill group is kept together when it fits, but
+ * its trailing segments may be trimmed before the whole unit is dropped.
  */
 function computeResponsiveLayout(
   ctx: SegmentContext,
@@ -1183,10 +1198,11 @@ function computeResponsiveLayout(
   let overflow = false;
 
   for (const unit of renderedUnits) {
-    const neededWidth = unit.width + (topUnits.length > 0 ? separatorWidth : 0);
-    if (!overflow && currentWidth + neededWidth <= availableWidth) {
-      topUnits.push(unit.content);
-      currentWidth += neededWidth;
+    const separator = topUnits.length > 0 ? separatorWidth : 0;
+    const fitted = !overflow ? fitRenderedStatusUnit(unit, availableWidth - currentWidth - separator) : null;
+    if (fitted !== null) {
+      topUnits.push(fitted.content);
+      currentWidth += separator + fitted.width;
     } else {
       overflow = true;
       overflowUnits.push(unit);
@@ -1202,16 +1218,18 @@ function computeResponsiveLayout(
   for (const unit of overflowUnits) {
     if (!wrap) break;
     let row = secondaryRows[secondaryRows.length - 1]!;
-    let neededWidth = unit.width + (row.length > 0 ? separatorWidth : 0);
-    if (secondaryWidth + neededWidth > availableWidth) {
-      if (baseOverhead + unit.width > availableWidth) continue;
+    let separator = row.length > 0 ? separatorWidth : 0;
+    let fitted = fitRenderedStatusUnit(unit, availableWidth - secondaryWidth - separator);
+    if (fitted === null && row.length > 0) {
       row = [];
       secondaryRows.push(row);
       secondaryWidth = baseOverhead;
-      neededWidth = unit.width;
+      separator = 0;
+      fitted = fitRenderedStatusUnit(unit, availableWidth - secondaryWidth);
     }
-    row.push(unit.content);
-    secondaryWidth += neededWidth;
+    if (fitted === null) continue;
+    row.push(fitted.content);
+    secondaryWidth += separator + fitted.width;
   }
 
   return {

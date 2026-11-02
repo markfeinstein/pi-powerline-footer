@@ -320,6 +320,43 @@ test("responsive secondary content is dropped without wrapping", async () => {
   }
 });
 
+async function renderGroupedPillDrop(width: number): Promise<string> {
+  const root = mkdtempSync(join(tmpdir(), "powerline-grouped-pill-drop-"));
+  const statuses = new Map([[
+    "alpha", "alpha-one",
+  ], ["wide", "this-status-is-far-too-wide"]]);
+  writeFileSync(join(root, "settings.json"), JSON.stringify({
+    powerline: {
+      welcome: false,
+      pills: true,
+      nerdFonts: true,
+      secondaryOverflow: "drop",
+      layout: { left: [], right: ["custom:alpha", "custom:wide"], secondary: [] },
+      pillGroups: [["custom:alpha", "custom:wide"]],
+      customItems: [...statuses.keys()].map((id) => ({ id, position: "right" })),
+    },
+  }));
+  const footerData: ReadonlyFooterDataProvider = {
+    getGitBranch: () => null,
+    getExtensionStatuses: () => statuses,
+    getAvailableProviderCount: () => 0,
+    onBranchChange: () => () => {},
+  };
+  const { extension, restoreEnv } = await loadPowerline(root);
+  const fake = createFakePi();
+  const runtime = createCtx({ cwd: root, footerData });
+
+  try {
+    extension(fake.pi);
+    await fake.handlers.get("session_start")?.({ reason: "resume" }, runtime.ctx);
+    return runtime.widgets.get("powerline-top")!.render(width).join("\\n");
+  } finally {
+    await fake.handlers.get("session_shutdown")?.({}, runtime.ctx);
+    restoreEnv();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+}
+
 async function renderSecondaryOverflowFooter(secondaryOverflow: string | undefined, width: number): Promise<string[]> {
   const root = mkdtempSync(join(tmpdir(), "powerline-secondary-overflow-"));
   const statuses = new Map([["alpha", "alpha-one"], ["wide", "this-status-is-far-too-wide"], ["bravo", "bravo-two"], ["charlie", "charlie-3"]]);
@@ -351,6 +388,16 @@ async function renderSecondaryOverflowFooter(secondaryOverflow: string | undefin
     fs.rmSync(root, { recursive: true, force: true });
   }
 }
+
+test("grouped pills trim trailing segments before drop", async () => {
+  const rendered = await renderGroupedPillDrop(24);
+  const plain = rendered.replace(/\x1b\[[0-9;]*m/g, "");
+
+  assert.match(plain, /alpha-one/);
+  assert.doesNotMatch(plain, /this-status-is-far-too-wide/);
+  assert.equal(rendered.split(PILL_LEFT_CAP).length - 1, 1);
+  assert.equal(rendered.split(PILL_RIGHT_CAP).length - 1, 1);
+});
 
 test("secondary overflow drops non-fitting rows by default and wraps when opted in", async () => {
   const visibleRows = (rows: string[]) => rows.map((row) => row.replace(/\x1b\[[0-9;]*m/g, "").trim());
