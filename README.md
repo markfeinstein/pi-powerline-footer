@@ -218,7 +218,7 @@ The compact counters in the example layout mean:
 | `token_in` | Cumulative input/prompt tokens charged to the session. |
 | `token_out` | Cumulative output tokens generated in the session. |
 | `cache_read` | Prompt-cache usage. With `session-request`, it shows the whole-session hit rate and the latest request's hit rate (`last`). |
-| `context_pct` | Current branch context used versus the model's context window, with the percentage in parentheses. |
+| `context_pct` | Current branch context used versus the model's context window. The `full` format adds the percentage; `tokens` omits it. |
 | `cost` | Reported model cost in the selected currency; `reported-cost` shows `$0.00` for a subscription with no reported charge. |
 | `queue` | Powerline prompts waiting to send, plus prompts blocked behind compaction when applicable. |
 | `time_spent` | Elapsed time since the session started. In the bundled configuration it appears beside Pi's Working/Waiting indicator above the input. |
@@ -329,7 +329,7 @@ Segment display formats (opt-in; defaults match the historical rendering):
 
 | Segment option | Values | Default | Effect |
 |---|---|---|---|
-| `"context": { "format" }` | `"full"` / `"percent"` | `"full"` | `"percent"` shows a bare rounded `83%` (threshold-colored, no icon) instead of `12k/200k (6.2%)` |
+| `"context": { "format" }` | `"full"` / `"tokens"` / `"percent"` | `"full"` | `"full"` shows `12k/200k (6.2%)`; `"tokens"` shows `12k/200k`; `"percent"` shows a bare rounded `83%` (threshold-colored, no icon) |
 | `"cache_read": { "format" }` | `"tokens"` / `"percent"` / `"both"` / `"request"` / `"session-request"` | `"tokens"` | Hit rates are `cacheRead / (input + cacheRead + cacheWrite)`. `"percent"` shows the whole-session hit rate instead of the raw token count; `"both"` shows raw tokens plus that rate, e.g. `cache in: 12k (80%)`; `"request"` shows the latest request's rate, colored by the `cacheHit*` semantic colors (below 30% error, below 70% warning, otherwise success), and shows `--` until a request completes after a compaction or model switch; `"session-request"` shows the session rate, then the latest request's after `·`, e.g. `cache 24% · last 16%`, each colored by its own band |
 
 ```json

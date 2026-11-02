@@ -73,6 +73,17 @@ test("context_pct defaults to the full tokens/window rendering", () => {
   assert.equal(stripAnsi(rendered.content), "◫ 12k/200k (6.2%) AC");
 });
 
+test("context_pct tokens format omits the percentage", () => {
+  const ctx = createSegmentContext({ context: { format: "tokens" } }, {
+    contextTokens: 12300,
+    contextWindow: 200000,
+    contextPercent: 6.15,
+  });
+
+  const rendered = renderSegment("context_pct", ctx);
+  assert.equal(stripAnsi(rendered.content), "◫ 12k/200k AC");
+});
+
 test("context_pct percent format renders a bare rounded percentage", () => {
   const ctx = createSegmentContext({ context: { format: "percent" } }, {
     contextTokens: 12300,
@@ -339,11 +350,11 @@ test("queue segment highlights compaction-held prompts", () => {
 
 test("parsePowerlineConfig accepts context and cache_read formats", () => {
   const config = parsePowerlineConfig({
-    context: { format: "percent" },
+    context: { format: "tokens" },
     cache_read: { format: "both" },
   }, PRESET_NAMES);
 
-  assert.equal(config.segmentOptions.context?.format, "percent");
+  assert.equal(config.segmentOptions.context?.format, "tokens");
   assert.equal(config.segmentOptions.cache_read?.format, "both");
 });
 
