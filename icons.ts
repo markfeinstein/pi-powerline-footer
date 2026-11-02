@@ -69,11 +69,11 @@ export const NERD_ICONS: IconSet = {
   gitlab: "\uF296",     // nf-fa-gitlab (tanuki)
   bitbucket: "\uF171",  // nf-fa-bitbucket
   tokens: "\uE26B",     // nf-seti-html (tokens symbol)
-  context: "\uF1C0",    // nf-fa-database (stable Nerd Fonts v3 database)
+  context: "\u{F035B}",  // nf-md-memory (context window)
   cost: "\uF155",       // nf-fa-dollar
   time: "\uF017",       // nf-fa-clock_o
   agents: "\uF0C0",     // nf-fa-users
-  cache: "\uF1C0",      // nf-fa-database (cache)
+  cache: "\u{F00E8}",    // nf-md-cached (prompt cache)
   input: "\uF090",      // nf-fa-sign_in (input arrow)
   output: "\uF08B",     // nf-fa-sign_out (output arrow)
   host: "\uF109",       // nf-fa-laptop (host)

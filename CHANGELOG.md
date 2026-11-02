@@ -10,6 +10,7 @@
 
 ### Changed
 - **Thinking label** — Replaced the `think:` prefix with a brain emoji for a more compact status segment.
+- **Context and cache icons** — Use a memory symbol for the context window and a cached/refresh symbol for prompt-cache statistics instead of two identical database symbols.
 - **Reported subscription cost** — `cost.subscriptionDisplay: "reported-cost"` now shows `$0.00` when a subscription session has no reported charge instead of falling back to `(sub)`.
 
 ### Fixed

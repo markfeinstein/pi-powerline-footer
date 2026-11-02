@@ -1,6 +1,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { hasNerdFonts, setNerdFontsPreference } from "../icons.ts";
+import { hasNerdFonts, NERD_ICONS, setNerdFontsPreference } from "../icons.ts";
+
+test("context and cache use distinct Nerd Font symbols", () => {
+  assert.equal(NERD_ICONS.context, "\u{F035B}");
+  assert.equal(NERD_ICONS.cache, "\u{F00E8}");
+  assert.notEqual(NERD_ICONS.context, NERD_ICONS.cache);
+});
 
 test("hasNerdFonts uses TERM only when TERM_PROGRAM is unset and preserves overrides", () => {
   const saved = { ...process.env };

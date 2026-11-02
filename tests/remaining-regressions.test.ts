@@ -203,8 +203,8 @@ test("context segment shows used tokens, maximum, and percentage", () => {
   assert.equal(context.visible, true);
 });
 
-test("Nerd Font context icon uses stable database glyph", () => {
-  assert.equal(NERD_ICONS.context, "\uF1C0");
+test("Nerd Font context icon uses the memory glyph", () => {
+  assert.equal(NERD_ICONS.context, "\u{F035B}");
 });
 
 test("startup welcome predicate respects powerline.welcome false", () => {
