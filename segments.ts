@@ -215,7 +215,7 @@ const thinkingSegment: StatusLineSegment = {
       xhigh: "xhigh",
     };
     const label = levelText[level] || level;
-    const content = `think:${label}`;
+    const content = `🧠 ${label}`;
 
     if (level === "high") {
       return { content: color(ctx, "thinkingHigh", content), visible: true };

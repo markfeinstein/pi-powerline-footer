@@ -27,7 +27,7 @@ Customizes the default [pi](https://github.com/badlogic/pi-mono) editor with a p
 
 **Native Pi layout** — Pi owns fixed input, feed scrolling, selection, and terminal behavior; this extension supplies powerline widgets and the custom bash/stash/editor integrations.
 
-**Live thinking level indicator** — Shows current thinking level (`think:off`, `think:med`, etc.) with per-level colors. High, xhigh, and max levels use a rainbow effect inspired by Claude Code's ultrathink.
+**Live thinking level indicator** — Shows current thinking level (`🧠 off`, `🧠 med`, etc.) with per-level colors. High, xhigh, and max levels use a rainbow effect inspired by Claude Code's ultrathink.
 
 **Smart defaults** — Nerd Font auto-detection for iTerm, WezTerm, Kitty, Ghostty, Alacritty, and Kaku with ASCII fallbacks. Colors matched to oh-my-pi's dark theme.
 
@@ -543,13 +543,13 @@ The thinking segment shows live updates when you change thinking level:
 
 | Level | Display | Color |
 |-------|---------|-------|
-| off | `think:off` | gray |
-| minimal | `think:min` | purple-gray |
-| low | `think:low` | blue |
-| medium | `think:med` | teal |
-| high | `think:high` | rainbow |
-| xhigh | `think:xhigh` | rainbow |
-| max | `think:max` | rainbow |
+| off | `🧠 off` | gray |
+| minimal | `🧠 min` | purple-gray |
+| low | `🧠 low` | blue |
+| medium | `🧠 med` | teal |
+| high | `🧠 high` | rainbow |
+| xhigh | `🧠 xhigh` | rainbow |
+| max | `🧠 max` | rainbow |
 
 The rainbow is the default for `high`, `xhigh`, and `max`. Override it per level with `thinkingHigh`, `thinkingXhigh`, and `thinkingMax` in `theme.json`; see [Theming](#theming).
 
