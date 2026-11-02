@@ -45,6 +45,14 @@ test("wrapInPillGroup renders one multi-color capsule", () => {
   assert.ok(!pill.includes(`git ${reset}`));
 });
 
+test("cost pills omit the trailing spacer after subscription text", () => {
+  const units = buildPillUnits([{ id: "cost", content: "(sub)" }], [], {}, "#000000");
+  assert.equal(units[0]![0]!.trailingSpace, false);
+
+  const pill = wrapInPillGroup(units[0]!);
+  assert.ok(!pill.includes(`(sub) ${reset}`));
+});
+
 test("buildPillUnits groups only adjacent configured segments", () => {
   const parts = [
     { id: "path", content: "~/dev" },

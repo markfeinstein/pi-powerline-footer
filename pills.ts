@@ -53,6 +53,7 @@ const NO_TRAILING_SPACE = new Set([
   "cache_write",
   "thinking",
   "git",
+  "cost",
 ]);
 
 /** Wrap one pre-rendered segment in a filled pill. */

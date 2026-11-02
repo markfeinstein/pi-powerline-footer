@@ -8,6 +8,9 @@
 ### Changed
 - **Thinking label** — Replaced the `think:` prefix with a brain emoji for a more compact status segment.
 
+### Fixed
+- **Subscription pill spacing** — Removed the extra trailing space between `(sub)` and the pill's closing cap.
+
 ## [0.22.0] - 2026-10-29
 
 ### Highlights
