@@ -218,6 +218,8 @@ export interface SegmentContext {
   autoCompactEnabled: boolean;
   customCompactionEnabled: boolean;
   usingSubscription: boolean;
+  /** Force token input/output/cache segments to render even when their value is zero. */
+  alwaysShowTokens: boolean;
   queueSummary: QueueSummary;
   sessionStartTime: number;
   shellModeActive: boolean;

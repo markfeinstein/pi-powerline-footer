@@ -23,6 +23,8 @@ Customizes the default [pi](https://github.com/badlogic/pi-mono) editor with a p
 
 **Powerline placement** — The primary Powerline row can be shown above or below the editor.
 
+**Rounded pill layout** — Render individual or grouped segments as truecolor capsules with Nerd Font half-circle caps, per-segment backgrounds, optional foreground overrides, and bold text.
+
 **Native Pi layout** — Pi owns fixed input, feed scrolling, selection, and terminal behavior; this extension supplies powerline widgets and the custom bash/stash/editor integrations.
 
 **Live thinking level indicator** — Shows current thinking level (`think:off`, `think:med`, etc.) with per-level colors. High, xhigh, and max levels use a rainbow effect inspired by Claude Code's ultrathink.
@@ -206,6 +208,47 @@ Use `powerline.layout` to override segment order and grouping while keeping the 
 A present `left`, `right`, or `secondary` array replaces that preset group exactly; an empty array clears it. Omitted groups keep the preset entries and automatically append custom items by their configured `position`. Explicitly listing a segment moves it out of omitted preset groups, and explicitly placed custom items are not auto-appended elsewhere. `disabledSegments` is applied after layout. `separator` accepts any style listed below; omit it to keep the preset’s separator.
 
 Responsive behavior is unchanged: these groups control ordering and overflow priority, not permanently pinned terminal rows. `right` means “later primary segments,” not right-edge alignment. On wide terminals secondary entries can fit in the top bar; on narrow terminals primary overflow moves into the secondary line. Some segments are hidden when they have no value, so `thinking` appears only when the active session/model reports a non-`off` thinking level. Unknown entries are ignored with a startup warning. The old fixed `custom` preset has been removed; combine any preset with `layout` instead.
+
+### Pill layout
+
+Set `powerline.pills` to `true` to replace ordinary separators with rounded, filled capsules. The cap glyphs require a Nerd Font; set `nerdFonts` to `true` when terminal-name detection is not sufficient. An explicit `POWERLINE_NERD_FONTS=0|1` environment value still overrides the setting for one terminal.
+
+```json
+{
+  "powerline": {
+    "placement": "below",
+    "pills": true,
+    "nerdFonts": true,
+    "bold": true,
+    "layout": {
+      "left": ["token_in", "token_out", "cache_read", "context_pct", "cost", "time_spent"],
+      "right": ["model", "thinking", "path", "git"],
+      "secondary": []
+    },
+    "pillBackground": "#a29eaf",
+    "pillForeground": "#232136",
+    "pillGroups": [
+      ["token_in", "token_out", "cache_read"],
+      ["model", "thinking"],
+      ["path", "git"]
+    ],
+    "pillColors": {
+      "token_in": "#9eb1b0",
+      "token_out": "#9eb1b0",
+      "cache_read": "#9eb1b0",
+      "context_pct": "#b3a791",
+      "cost": "#d3b16f",
+      "model": "#ad9bc4",
+      "thinking": "#d2b082",
+      "path": "#97b8be",
+      "git": "#ccaeac"
+    },
+    "alwaysShowTokens": true
+  }
+}
+```
+
+`pillBackground` is the fallback `#RRGGBB` background. `pillColors` and `pillTextColors` provide per-segment background and foreground overrides; `pillForeground` supplies the default foreground. Adjacent visible segments listed in the same `pillGroups` entry share one capsule and stay together during responsive overflow. `bold` affects pill text only. When `alwaysShowTokens` is true, token input/output and cache segments remain visible at zero.
 
 Set `powerline.padding` to an integer from `0` to `8` to control the outer spaces on each edge of every primary and secondary bar row (including wrapped rows). The default is `1`, preserving the existing layout; malformed or out-of-range values fall back to `1`. Use `0` for a flush-left bar:
 

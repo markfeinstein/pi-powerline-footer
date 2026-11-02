@@ -1,5 +1,6 @@
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { normalizeCostCurrency } from "./currency-rates.ts";
+import { DEFAULT_PILL_BACKGROUND } from "./pills.ts";
 import { BUILTIN_STATUS_LINE_SEGMENT_IDS } from "./types.ts";
 import type { ColorValue, CustomItemPosition, CustomStatusItem, PowerlinePlacement, PresetDef, StatusLineLayout, StatusLinePreset, StatusLineSegmentId, StatusLineSegmentOptions, StatusLineSeparatorStyle } from "./types.ts";
 
@@ -19,6 +20,15 @@ export interface PowerlineConfig {
   placement: PowerlinePlacement;
   invalidPlacement: string | null;
   padding: number;
+  pills: boolean;
+  pillBackground: string;
+  pillColors: Record<string, string>;
+  pillForeground: string;
+  pillTextColors: Record<string, string>;
+  pillGroups: string[][];
+  alwaysShowTokens: boolean;
+  bold: boolean;
+  nerdFonts: boolean | null;
   secondaryOverflow: SecondaryOverflow;
   invalidSecondaryOverflow: string | null;
   workingIndicatorPlacement: WorkingIndicatorPlacement;
@@ -103,6 +113,37 @@ function normalizeSeparator(value: unknown): StatusLineSeparatorStyle | null {
   return (SEPARATOR_STYLES as readonly string[]).includes(normalized)
     ? (normalized as StatusLineSeparatorStyle)
     : null;
+}
+
+const HEX_COLOR = /^#[0-9a-fA-F]{6}$/;
+
+function normalizeHexColor(value: unknown, fallback: string): string {
+  return typeof value === "string" && HEX_COLOR.test(value.trim()) ? value.trim() : fallback;
+}
+
+function normalizeHexColorMap(value: unknown): Record<string, string> {
+  if (!isRecord(value)) return {};
+
+  const colors: Record<string, string> = {};
+  for (const [segmentId, rawColor] of Object.entries(value)) {
+    if (typeof rawColor === "string" && HEX_COLOR.test(rawColor.trim())) {
+      colors[segmentId] = rawColor.trim();
+    }
+  }
+  return colors;
+}
+
+function normalizePillGroups(value: unknown): string[][] {
+  if (!Array.isArray(value)) return [];
+
+  const groups: string[][] = [];
+  for (const rawGroup of value) {
+    if (!Array.isArray(rawGroup)) continue;
+    const group = rawGroup.filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0)
+      .map((entry) => entry.trim());
+    if (group.length > 0) groups.push([...new Set(group)]);
+  }
+  return groups;
 }
 
 function normalizeCustomItemId(value: unknown): string | null {
@@ -359,6 +400,15 @@ export function parsePowerlineConfig(value: unknown, presets: readonly StatusLin
     placement: "above",
     invalidPlacement: null,
     padding: 1,
+    pills: false,
+    pillBackground: DEFAULT_PILL_BACKGROUND,
+    pillColors: {},
+    pillForeground: "",
+    pillTextColors: {},
+    pillGroups: [],
+    alwaysShowTokens: false,
+    bold: false,
+    nerdFonts: null,
     secondaryOverflow: "drop",
     invalidSecondaryOverflow: null,
     workingIndicatorPlacement: "editor-border",
@@ -398,6 +448,15 @@ export function parsePowerlineConfig(value: unknown, presets: readonly StatusLin
     padding: typeof value.padding === "number" && Number.isInteger(value.padding) && value.padding >= 0 && value.padding <= 8
       ? value.padding
       : defaultConfig.padding,
+    pills: value.pills === true,
+    pillBackground: normalizeHexColor(value.pillBackground, DEFAULT_PILL_BACKGROUND),
+    pillColors: normalizeHexColorMap(value.pillColors),
+    pillForeground: normalizeHexColor(value.pillForeground, ""),
+    pillTextColors: normalizeHexColorMap(value.pillTextColors),
+    pillGroups: normalizePillGroups(value.pillGroups),
+    alwaysShowTokens: value.alwaysShowTokens === true,
+    bold: value.bold === true,
+    nerdFonts: typeof value.nerdFonts === "boolean" ? value.nerdFonts : null,
     secondaryOverflow,
     invalidSecondaryOverflow,
     workingIndicatorPlacement,

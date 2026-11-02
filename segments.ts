@@ -278,7 +278,7 @@ const tokenInSegment: StatusLineSegment = {
   render(ctx) {
     const icons = getIcons();
     const { input } = ctx.usageStats;
-    if (!input) return { content: "", visible: false };
+    if (!input && !ctx.alwaysShowTokens) return { content: "", visible: false };
 
     const content = withIcon(icons.input, formatTokens(input));
     return { content: color(ctx, "tokens", content), visible: true };
@@ -290,7 +290,7 @@ const tokenOutSegment: StatusLineSegment = {
   render(ctx) {
     const icons = getIcons();
     const { output } = ctx.usageStats;
-    if (!output) return { content: "", visible: false };
+    if (!output && !ctx.alwaysShowTokens) return { content: "", visible: false };
 
     const content = withIcon(icons.output, formatTokens(output));
     return { content: color(ctx, "tokens", content), visible: true };
@@ -501,7 +501,7 @@ const cacheReadSegment: StatusLineSegment = {
 
     const icons = getIcons();
     const { cacheRead } = ctx.usageStats;
-    if (!cacheRead) return { content: "", visible: false };
+    if (!cacheRead && !ctx.alwaysShowTokens) return { content: "", visible: false };
 
     const hitRate = hitRatePercent(ctx.usageStats) ?? 0;
 
@@ -521,7 +521,7 @@ const cacheWriteSegment: StatusLineSegment = {
   render(ctx) {
     const icons = getIcons();
     const { cacheWrite } = ctx.usageStats;
-    if (!cacheWrite) return { content: "", visible: false };
+    if (!cacheWrite && !ctx.alwaysShowTokens) return { content: "", visible: false };
 
     const parts = [icons.cache, icons.output, formatTokens(cacheWrite)].filter(Boolean);
     const content = parts.join(" ");

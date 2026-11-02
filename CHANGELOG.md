@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Added
+- **Rounded pill layout** — Set `powerline.pills` to render segments as truecolor capsules with Nerd Font caps, per-segment colors, adjacent segment grouping, optional foreground overrides, bold text, and responsive group-aware overflow.
+
 ## [0.22.0] - 2026-10-29
 
 ### Highlights

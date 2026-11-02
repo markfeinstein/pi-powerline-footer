@@ -1,10 +1,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { hasNerdFonts } from "../icons.ts";
+import { hasNerdFonts, setNerdFontsPreference } from "../icons.ts";
 
 test("hasNerdFonts uses TERM only when TERM_PROGRAM is unset and preserves overrides", () => {
   const saved = { ...process.env };
   try {
+    setNerdFontsPreference(null);
     delete process.env.TERM_PROGRAM;
     delete process.env.POWERLINE_NERD_FONTS;
     delete process.env.GHOSTTY_RESOURCES_DIR;
@@ -40,6 +41,36 @@ test("hasNerdFonts uses TERM only when TERM_PROGRAM is unset and preserves overr
     process.env.POWERLINE_NERD_FONTS = "0";
     assert.equal(hasNerdFonts(), false, "explicit disable overrides Ghostty");
   } finally {
+    setNerdFontsPreference(null);
+    for (const key of ["TERM", "TERM_PROGRAM", "POWERLINE_NERD_FONTS", "GHOSTTY_RESOURCES_DIR"]) {
+      if (key in saved) process.env[key] = saved[key];
+      else delete process.env[key];
+    }
+  }
+});
+
+test("powerline nerdFonts setting overrides terminal heuristics but not the environment", () => {
+  const saved = { ...process.env };
+  try {
+    delete process.env.POWERLINE_NERD_FONTS;
+    delete process.env.GHOSTTY_RESOURCES_DIR;
+    process.env.TERM_PROGRAM = "vscode";
+    process.env.TERM = "xterm-256color";
+
+    setNerdFontsPreference(true);
+    assert.equal(hasNerdFonts(), true);
+
+    setNerdFontsPreference(false);
+    assert.equal(hasNerdFonts(), false);
+
+    process.env.POWERLINE_NERD_FONTS = "1";
+    assert.equal(hasNerdFonts(), true);
+
+    process.env.POWERLINE_NERD_FONTS = "0";
+    setNerdFontsPreference(true);
+    assert.equal(hasNerdFonts(), false);
+  } finally {
+    setNerdFontsPreference(null);
     for (const key of ["TERM", "TERM_PROGRAM", "POWERLINE_NERD_FONTS", "GHOSTTY_RESOURCES_DIR"]) {
       if (key in saved) process.env[key] = saved[key];
       else delete process.env[key];

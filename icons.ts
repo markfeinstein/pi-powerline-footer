@@ -162,15 +162,24 @@ export const ASCII_SEPARATORS: SeparatorChars = {
   dot: ".",
 };
 
-// Infer Nerd Font support from environment overrides and terminal-name heuristics.
+// Infer Nerd Font support from an environment override, the Powerline setting,
+// and finally terminal-name heuristics.
+let configuredNerdFonts: boolean | null = null;
+
+export function setNerdFontsPreference(value: boolean | null | undefined): void {
+  configuredNerdFonts = value ?? null;
+}
+
 export function hasNerdFonts(): boolean {
-  // User can set this env var to force Nerd Fonts
+  // Environment remains the per-terminal escape hatch and wins when explicit.
   if (process.env.POWERLINE_NERD_FONTS === "1") return true;
   if (process.env.POWERLINE_NERD_FONTS === "0") return false;
-  
+
+  if (configuredNerdFonts !== null) return configuredNerdFonts;
+
   // Check for Ghostty (survives into tmux via GHOSTTY_RESOURCES_DIR)
   if (process.env.GHOSTTY_RESOURCES_DIR) return true;
-  
+
   // Use TERM only when TERM_PROGRAM is unset (e.g. kitty uses TERM=xterm-kitty).
   // Terminal names are a heuristic, not detection of the configured font.
   const term = (process.env.TERM_PROGRAM ?? process.env.TERM ?? "").toLowerCase();

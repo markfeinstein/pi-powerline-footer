@@ -27,6 +27,8 @@ import { getPreset, PRESETS } from "./presets.ts";
 import { getAgentPath } from "./paths.ts";
 import { collectHiddenExtensionStatusKeys, getNotificationExtensionStatuses, mergeSegmentOptions, mergeSegmentsWithCustomItems, nextPowerlineSettingWithOptions, nextPowerlineSettingWithPreset, parsePowerlineConfig } from "./powerline-config.ts";
 import { getSeparator } from "./separators.ts";
+import { setNerdFontsPreference } from "./icons.ts";
+import { buildPillUnits, DEFAULT_PILL_BACKGROUND, wrapInPillGroup } from "./pills.ts";
 import { renderSegment } from "./segments.ts";
 import { resolveThinkingLevelSelection } from "./thinking-level.ts";
 import { getGitStatus, invalidateGitStatus, invalidateGitBranch, subscribeGitUpdates } from "./git-status.ts";
@@ -87,6 +89,15 @@ let config: PowerlineConfig = {
   placement: "above",
   invalidPlacement: null,
   padding: 1,
+  pills: false,
+  pillBackground: DEFAULT_PILL_BACKGROUND,
+  pillColors: {},
+  pillForeground: "",
+  pillTextColors: {},
+  pillGroups: [],
+  alwaysShowTokens: false,
+  bold: false,
+  nerdFonts: null,
   secondaryOverflow: "drop",
   invalidSecondaryOverflow: null,
   workingIndicatorPlacement: "editor-border",
@@ -1089,10 +1100,10 @@ export function renderFastPowerlineEditor(
 // Status Line Builder
 // ═══════════════════════════════════════════════════════════════════════════
 
-/** Render a single segment and return its content with width */
+/** Render a single segment and return its content with width. */
 function renderSegmentWithWidth(
   segId: StatusLineSegmentId,
-  ctx: SegmentContext
+  ctx: SegmentContext,
 ): { content: string; width: number; visible: boolean } {
   const rendered = renderSegment(segId, ctx);
   if (!rendered.visible || !rendered.content) {
@@ -1101,94 +1112,109 @@ function renderSegmentWithWidth(
   return { content: rendered.content, width: visibleWidth(rendered.content), visible: true };
 }
 
-/** Build content string from pre-rendered parts */
+type RenderedStatusUnit = { content: string; width: number };
+
+function buildRenderedStatusUnits(
+  parts: readonly { id: string; content: string; width: number }[],
+): RenderedStatusUnit[] {
+  if (!config.pills) {
+    return parts.map(({ content, width }) => ({ content, width }));
+  }
+
+  return buildPillUnits(
+    parts,
+    config.pillGroups,
+    config.pillColors,
+    config.pillBackground,
+    config.pillTextColors,
+    config.pillForeground,
+  ).map((unit) => {
+    const content = wrapInPillGroup(unit, config.bold);
+    return { content, width: visibleWidth(content) };
+  });
+}
+
+/** Build one status row from pre-rendered segments or pill units. */
 function buildContentFromParts(
-  parts: string[],
+  parts: readonly string[],
   separatorStyle: StatusLineSeparatorStyle,
 ): string {
   if (parts.length === 0) return "";
-  const separatorDef = getSeparator(separatorStyle);
-  const sepAnsi = getFgAnsiCode("sep");
-  const sep = separatorDef.left;
+
+  const separator = config.pills
+    ? " "
+    : ` ${getFgAnsiCode("sep")}${getSeparator(separatorStyle).left}${ansi.reset} `;
   const padding = " ".repeat(config.padding);
-  return padding + parts.join(` ${sepAnsi}${sep}${ansi.reset} `) + ansi.reset + padding;
+  return padding + parts.join(separator) + ansi.reset + padding;
 }
 
 type ResponsiveLayout = { topContent: string; secondaryLines: string[] };
 
 /**
- * Responsive segment layout - fits segments into top bar, overflows to secondary row.
- * When terminal is wide enough, secondary segments move up to top bar.
- * When narrow, top bar segments overflow down to secondary row.
- * With `secondaryOverflow: "wrap"`, secondary overflow continues on additional rows.
+ * Responsive segment layout - fits segments into the top bar and overflows to
+ * secondary rows. A configured pill group is kept together as one layout unit.
  */
 function computeResponsiveLayout(
   ctx: SegmentContext,
   presetDef: ReturnType<typeof getPreset>,
   allSegmentIds: StatusLineSegmentId[],
-  availableWidth: number
+  availableWidth: number,
 ): ResponsiveLayout {
   const separatorStyle = config.separator ?? presetDef.separator;
-  const separatorDef = getSeparator(separatorStyle);
-  const sepWidth = visibleWidth(separatorDef.left) + 2; // separator + spaces around it
+  const separatorWidth = config.pills ? 1 : visibleWidth(getSeparator(separatorStyle).left) + 2;
 
-  // Render all segments and get their widths
-  const renderedSegments: { content: string; width: number }[] = [];
-  for (const segId of allSegmentIds) {
-    const { content, width, visible } = renderSegmentWithWidth(segId, ctx);
-    if (visible) {
-      renderedSegments.push({ content, width });
-    }
+  const renderedParts: { id: string; content: string; width: number }[] = [];
+  for (const segmentId of allSegmentIds) {
+    const { content, width, visible } = renderSegmentWithWidth(segmentId, ctx);
+    if (visible) renderedParts.push({ id: segmentId, content, width });
   }
 
-  if (renderedSegments.length === 0) {
+  const renderedUnits = buildRenderedStatusUnits(renderedParts);
+  if (renderedUnits.length === 0) {
     return { topContent: "", secondaryLines: [] };
   }
 
-  // Calculate how many segments fit in top bar
   // Reserve the configured outer padding on both edges of every row.
   const baseOverhead = 2 * config.padding;
   let currentWidth = baseOverhead;
-  let topSegments: string[] = [];
-  let overflowSegments: { content: string; width: number }[] = [];
+  const topUnits: string[] = [];
+  const overflowUnits: RenderedStatusUnit[] = [];
   let overflow = false;
 
-  for (const seg of renderedSegments) {
-    const neededWidth = seg.width + (topSegments.length > 0 ? sepWidth : 0);
-
+  for (const unit of renderedUnits) {
+    const neededWidth = unit.width + (topUnits.length > 0 ? separatorWidth : 0);
     if (!overflow && currentWidth + neededWidth <= availableWidth) {
-      topSegments.push(seg.content);
+      topUnits.push(unit.content);
       currentWidth += neededWidth;
     } else {
       overflow = true;
-      overflowSegments.push(seg);
+      overflowUnits.push(unit);
     }
   }
 
-  // Fit overflow segments into secondary rows (same width constraint).
-  // Drop mode stops at the first non-fitting segment to preserve ordering.
-  // Wrap mode starts a new row instead, skipping segments too wide for any row.
+  // Drop mode stops at the first non-fitting unit. Wrap mode starts another row
+  // and skips only a unit that cannot fit on an otherwise empty row.
   const wrap = config.secondaryOverflow === "wrap";
   const secondaryRows: string[][] = [[]];
   let secondaryWidth = baseOverhead;
 
-  for (const seg of overflowSegments) {
+  for (const unit of overflowUnits) {
     let row = secondaryRows[secondaryRows.length - 1]!;
-    let neededWidth = seg.width + (row.length > 0 ? sepWidth : 0);
+    let neededWidth = unit.width + (row.length > 0 ? separatorWidth : 0);
     if (secondaryWidth + neededWidth > availableWidth) {
       if (!wrap) break;
-      if (baseOverhead + seg.width > availableWidth) continue;
+      if (baseOverhead + unit.width > availableWidth) continue;
       row = [];
       secondaryRows.push(row);
       secondaryWidth = baseOverhead;
-      neededWidth = seg.width;
+      neededWidth = unit.width;
     }
-    row.push(seg.content);
+    row.push(unit.content);
     secondaryWidth += neededWidth;
   }
 
   return {
-    topContent: buildContentFromParts(topSegments, separatorStyle),
+    topContent: buildContentFromParts(topUnits, separatorStyle),
     secondaryLines: secondaryRows
       .filter((row) => row.length > 0)
       .map((row) => buildContentFromParts(row, separatorStyle)),
@@ -1237,6 +1263,7 @@ export default function powerlineFooter(pi: ExtensionAPI) {
   const editorPerf = new EditorPerfProfiler(readEditorPerfOptions());
   const startupSettings = readSettings();
   config = parsePowerlineConfig(startupSettings.powerline, PRESET_NAMES);
+  setNerdFontsPreference(config.nerdFonts);
   let resolvedShortcuts = resolveShortcutConfig(startupSettings);
   let bashModeSettings = parseBashModeSettings(startupSettings, resolvedShortcuts);
 
@@ -1891,6 +1918,7 @@ export default function powerlineFooter(pi: ExtensionAPI) {
     bashModeSettings = parseBashModeSettings(settings, resolvedShortcuts);
     showLastPrompt = settings.showLastPrompt !== false;
     config = parsePowerlineConfig(settings.powerline, PRESET_NAMES);
+    setNerdFontsPreference(config.nerdFonts);
     warnInvalidSegmentSettings(ctx);
     stashedPromptHistory = readPersistedStashHistory();
     bashModeActive = false;
@@ -2981,6 +3009,7 @@ export default function powerlineFooter(pi: ExtensionAPI) {
       autoCompactEnabled: ctx.settingsManager?.getCompactionSettings?.()?.enabled ?? true,
       customCompactionEnabled: customCompactionEnabled || extensionStatuses.has(CUSTOM_COMPACTION_STATUS_KEY),
       usingSubscription,
+      alwaysShowTokens: config.alwaysShowTokens,
       queueSummary,
       sessionStartTime,
       shellModeActive: bashModeActive,

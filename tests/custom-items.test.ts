@@ -34,6 +34,12 @@ test("parsePowerlineConfig supports object config with custom items", () => {
   assert.equal(config.separator, null);
   assert.equal(config.placement, "above");
   assert.equal(config.invalidPlacement, null);
+  assert.equal(config.pills, false);
+  assert.deepEqual(config.pillColors, {});
+  assert.deepEqual(config.pillGroups, []);
+  assert.equal(config.alwaysShowTokens, false);
+  assert.equal(config.bold, false);
+  assert.equal(config.nerdFonts, null);
   assert.equal(config.welcome, true);
   assert.equal(config.stashSharpSShortcut, false);
   assert.deepEqual(config.queue, { compactPromptMode: "queue" });

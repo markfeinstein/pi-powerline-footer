@@ -11,6 +11,7 @@ import childProcess from "node:child_process";
 import type { ReadonlyFooterDataProvider } from "@earendil-works/pi-coding-agent";
 import { waitForGitUpdates } from "../git-status.ts";
 import { NERD_ICONS } from "../icons.ts";
+import { PILL_LEFT_CAP, PILL_RIGHT_CAP } from "../pills.ts";
 import { visibleWidth } from "@earendil-works/pi-tui";
 
 const source = readFileSync(new URL("../index.ts", import.meta.url), "utf-8");
@@ -216,6 +217,51 @@ function createCtx(options: { cwd: string; mode?: "tui" | "rpc"; sessionId?: str
     },
   };
 }
+
+test("pill layout renders one grouped rounded capsule below the editor", async () => {
+  const root = mkdtempSync(join(tmpdir(), "powerline-pill-layout-"));
+  writeFileSync(join(root, "settings.json"), JSON.stringify({
+    powerline: {
+      welcome: false,
+      placement: "below",
+      padding: 0,
+      pills: true,
+      nerdFonts: true,
+      bold: true,
+      pillForeground: "#232136",
+      pillColors: { model: "#ad9bc4", path: "#97b8be" },
+      pillGroups: [["model", "path"]],
+      layout: { left: ["model", "path"], right: [], secondary: [] },
+    },
+  }));
+  const footerData: ReadonlyFooterDataProvider = {
+    getGitBranch: () => null,
+    getExtensionStatuses: () => new Map(),
+    getAvailableProviderCount: () => 0,
+    onBranchChange: () => () => {},
+  };
+  const { extension, restoreEnv } = await loadPowerline(root);
+  const fake = createFakePi();
+  const runtime = createCtx({ cwd: root, footerData });
+
+  try {
+    extension(fake.pi);
+    await fake.handlers.get("session_start")?.({ reason: "resume" }, runtime.ctx);
+
+    assert.equal(runtime.widgetPlacements.get("powerline-top"), "belowEditor");
+    const rendered = runtime.widgets.get("powerline-top")!.render(240).join("\n");
+    assert.equal(rendered.split(PILL_LEFT_CAP).length - 1, 1);
+    assert.equal(rendered.split(PILL_RIGHT_CAP).length - 1, 1);
+    assert.ok(rendered.includes("\x1b[48;2;173;155;196m"), "model pill color is applied");
+    assert.ok(rendered.includes("\x1b[48;2;151;184;190m"), "path pill color is applied");
+    assert.ok(rendered.includes("\x1b[1m"), "pill text is bold");
+    assert.ok(visibleWidth(rendered) <= 240);
+  } finally {
+    await fake.handlers.get("session_shutdown")?.({}, runtime.ctx);
+    restoreEnv();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
 
 test("responsive secondary content is owned exclusively by the footer", async () => {
   const root = mkdtempSync(join(tmpdir(), "powerline-secondary-footer-"));
