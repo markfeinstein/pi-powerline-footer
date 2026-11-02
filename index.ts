@@ -201,6 +201,7 @@ const STREAMING_LAYOUT_CACHE_TTL_MS = 1000;
 const STATUS_RENDER_DEBOUNCE_MS = 33;
 const CONTEXT_STATUS_RENDER_MS = 250;
 const EDITOR_STATUS_DEFER_MS = 150;
+const COMPLETED_TURN_DISPLAY_MS = 10_000;
 const QUEUE_SUMMARY_CACHE_TTL_MS = 250;
 const PROMPT_HISTORY_TRACKED = Symbol.for("powerlinePromptHistoryTracked");
 const PROMPT_HISTORY_STATE_KEY = Symbol.for("powerlinePromptHistoryState");
@@ -1281,6 +1282,8 @@ export default function powerlineFooter(pi: ExtensionAPI) {
   let tuiRef: any = null;
   let turnCount = 0;
   let workingTurnStartTime: number | null = null;
+  let completedTurnDurationMs: number | null = null;
+  let completedTurnClearTimer: ReturnType<typeof setTimeout> | null = null;
   let workingStatusTimer: ReturnType<typeof setInterval> | null = null;
   let restoreFooterStatusRepaintHook: (() => void) | null = null;
   let stashShortcutInputUnsubscribe: (() => void) | null = null;
@@ -1375,6 +1378,14 @@ export default function powerlineFooter(pi: ExtensionAPI) {
     statusRenderScheduler.schedule(0);
   };
 
+  const clearCompletedTurnDisplay = () => {
+    if (completedTurnClearTimer !== null) {
+      clearTimeout(completedTurnClearTimer);
+      completedTurnClearTimer = null;
+    }
+    completedTurnDurationMs = null;
+  };
+
   const stopWorkingStatusTimer = () => {
     if (workingStatusTimer !== null) {
       clearInterval(workingStatusTimer);
@@ -1384,6 +1395,7 @@ export default function powerlineFooter(pi: ExtensionAPI) {
   };
 
   const startWorkingStatusTimer = () => {
+    clearCompletedTurnDisplay();
     stopWorkingStatusTimer();
     workingTurnStartTime = Date.now();
     workingStatusTimer = setInterval(() => tuiRef?.requestRender(), 1000);
@@ -1906,6 +1918,7 @@ export default function powerlineFooter(pi: ExtensionAPI) {
   // Track session start
   pi.on("session_start", async (event, ctx) => {
     dismissWelcome(ctx);
+    clearCompletedTurnDisplay();
     stopWorkingStatusTimer();
     shellSession?.dispose();
     shellSession = null;
@@ -1971,6 +1984,7 @@ export default function powerlineFooter(pi: ExtensionAPI) {
   });
 
   pi.on("session_shutdown", async (event, ctx) => {
+    clearCompletedTurnDisplay();
     stopWorkingStatusTimer();
     try {
       if (event.reason === "reload") {
@@ -2538,7 +2552,17 @@ export default function powerlineFooter(pi: ExtensionAPI) {
 
   pi.on("agent_end", async (_event, ctx) => {
     isStreaming = false;
+    const completedDuration = workingTurnStartTime === null ? null : Date.now() - workingTurnStartTime;
     stopWorkingStatusTimer();
+    if (completedDuration !== null) {
+      completedTurnDurationMs = completedDuration;
+      completedTurnClearTimer = setTimeout(() => {
+        completedTurnDurationMs = null;
+        completedTurnClearTimer = null;
+        tuiRef?.requestRender();
+      }, COMPLETED_TURN_DISPLAY_MS);
+      tuiRef?.requestRender();
+    }
     liveAssistantUsage = null;
     coreContextUsageCache.reset();
 
@@ -3336,9 +3360,15 @@ export default function powerlineFooter(pi: ExtensionAPI) {
       const editor = new BashModeEditor(tui, editorTheme, keybindings, {
         keybindings,
         embedWorkingStatus: config.workingIndicatorPlacement === "editor-border",
-        getWorkingStatusSuffix: () => isStreaming && workingTurnStartTime !== null
-          ? `#${turnCount} ${getIcons().time} ${formatDuration(Date.now() - workingTurnStartTime)}`
-          : undefined,
+        getWorkingStatusSuffix: () => {
+          if (isStreaming && workingTurnStartTime !== null) {
+            return `#${turnCount} ${getIcons().time} ${formatDuration(Date.now() - workingTurnStartTime)}`;
+          }
+          if (!isStreaming && completedTurnDurationMs !== null) {
+            return `#${turnCount} ${getIcons().time} ${formatDuration(completedTurnDurationMs)}`;
+          }
+          return undefined;
+        },
         isBashModeActive: () => bashModeActive,
         isShellRunning: () => shellSession?.state.running ?? false,
         onExitBashMode: () => {

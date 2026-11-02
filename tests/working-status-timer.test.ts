@@ -25,7 +25,9 @@ test("leaves a narrow border unchanged when the timer cannot fit", () => {
 test("resets the working timer and increments the turn for each agent turn", () => {
   assert.match(source, /turnCount = 0/);
   assert.match(source, /pi\.on\("agent_start"[\s\S]*?turnCount \+= 1[\s\S]*?startWorkingStatusTimer\(\)/);
-  assert.match(source, /pi\.on\("agent_end"[\s\S]*?stopWorkingStatusTimer\(\)/);
+  assert.match(source, /pi\.on\("agent_end"[\s\S]*?completedDuration[\s\S]*?stopWorkingStatusTimer\(\)/);
+  assert.match(source, /COMPLETED_TURN_DISPLAY_MS = 10_000/);
+  assert.match(source, /completedTurnDurationMs = completedDuration/);
   assert.match(source, /workingTurnStartTime = Date\.now\(\)/);
   assert.match(source, /Date\.now\(\) - workingTurnStartTime/);
   assert.match(source, /`#\$\{turnCount\} \$\{getIcons\(\)\.time\}/);

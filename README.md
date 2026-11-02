@@ -221,7 +221,7 @@ The compact counters in the example layout mean:
 | `context_pct` | Current branch context used versus the model's context window. The `full` format adds the percentage; `tokens` omits it. |
 | `cost` | Reported model cost in the selected currency; `reported-cost` shows `$0.00` for a subscription with no reported charge. |
 | `queue` | Powerline prompts waiting to send, plus prompts blocked behind compaction when applicable. |
-| `time_spent` | Elapsed time for the current agent turn, from prompt submission until Pi finishes. In the bundled configuration it appears as `#turn time` beside Pi's Working/Waiting indicator above the input. |
+| `time_spent` | Elapsed time for the current agent turn, from prompt submission until Pi finishes. In the bundled configuration it appears as `#turn time` beside Pi's Working/Waiting indicator above the input and remains visible for 10 seconds after completion. |
 
 Token and cost totals include usage recorded across the session's billed work; context usage describes the active branch. The cache rate counts cache reads against input plus cache reads and writes.
 
