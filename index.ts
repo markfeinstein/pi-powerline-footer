@@ -3264,6 +3264,16 @@ export default function powerlineFooter(pi: ExtensionAPI) {
       }), { placement: "aboveEditor" });
     }
 
+    if (terminalWidgets && editorPerf.options.lastPrompt) {
+      ctx.ui.setWidget("powerline-last-prompt", () => ({
+        dispose() {},
+        invalidate() {},
+        render(width: number): string[] {
+          return measureWidget("last-prompt", () => renderLastPromptLines(width));
+        },
+      }), { placement: "belowEditor" });
+    }
+
     ctx.ui.setWidget("powerline-top", (_tui: any, theme: Theme) => ({
       dispose() {},
       invalidate() {
@@ -3302,15 +3312,6 @@ export default function powerlineFooter(pi: ExtensionAPI) {
       },
     }), { placement: "belowEditor" });
 
-    if (editorPerf.options.lastPrompt) {
-      ctx.ui.setWidget("powerline-last-prompt", () => ({
-        dispose() {},
-        invalidate() {},
-        render(width: number): string[] {
-          return measureWidget("last-prompt", () => renderLastPromptLines(width));
-        },
-      }), { placement: "aboveEditor" });
-    }
   }
 
   function setupCustomEditor(ctx: any) {
