@@ -1193,17 +1193,17 @@ function computeResponsiveLayout(
     }
   }
 
-  // Drop mode stops at the first non-fitting unit. Wrap mode starts another row
-  // and skips only a unit that cannot fit on an otherwise empty row.
+  // Drop mode hides every non-fitting unit. Wrap mode starts another row and
+  // skips only a unit that cannot fit on an otherwise empty row.
   const wrap = config.secondaryOverflow === "wrap";
-  const secondaryRows: string[][] = [[]];
+  const secondaryRows: string[][] = wrap ? [[]] : [];
   let secondaryWidth = baseOverhead;
 
   for (const unit of overflowUnits) {
+    if (!wrap) break;
     let row = secondaryRows[secondaryRows.length - 1]!;
     let neededWidth = unit.width + (row.length > 0 ? separatorWidth : 0);
     if (secondaryWidth + neededWidth > availableWidth) {
-      if (!wrap) break;
       if (baseOverhead + unit.width > availableWidth) continue;
       row = [];
       secondaryRows.push(row);

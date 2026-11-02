@@ -278,7 +278,7 @@ Set `powerline.padding` to an integer from `0` to `8` to control the outer space
 
 Padding does not change segment-internal spacing, separators, or editor, transcript, and queue-preview spacing. String preset shorthand keeps the default padding of `1`.
 
-By default, segments that don't fit on the secondary line are dropped. Set `"secondaryOverflow": "wrap"` in `powerline` to continue them on extra lines below instead. A single segment wider than the terminal is still hidden. The default is `"drop"`.
+By default, segments that don't fit on the primary bar are dropped. Set `"secondaryOverflow": "wrap"` in `powerline` to continue them on extra lines below instead. A single segment wider than the terminal is still hidden. The default is `"drop"`.
 
 Pi's working, compaction, summarization, and retry indicators appear in the editor's top border by default. Set `"workingIndicatorPlacement": "above-powerline"` to show them on Pi's separate status row above the Powerline bar and editor instead. Working Vibes messages follow the same placement. The default is `"editor-border"`. When the default embedded border is active, `time_spent` can share that row as a compact elapsed-session timer.
 

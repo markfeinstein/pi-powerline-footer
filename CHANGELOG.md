@@ -16,6 +16,7 @@
 - **Reported subscription cost** — `cost.subscriptionDisplay: "reported-cost"` now shows `$0.00` when a subscription session has no reported charge instead of falling back to `(sub)`.
 
 ### Fixed
+- **Narrow overflow** — `secondaryOverflow: "drop"` now hides all non-fitting units instead of adding a secondary row.
 - **Completed timer rendering** — Show the turn count and elapsed time with a `Done` label after the active status disappears.
 - **Auto-compaction icon** — Replaced the magic-wand glyph with collapse arrows so the context pill clearly indicates compaction.
 - **Subscription pill spacing** — Removed the extra trailing space between `(sub)` and the pill's closing cap.

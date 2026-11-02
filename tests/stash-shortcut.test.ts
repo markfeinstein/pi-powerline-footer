@@ -263,7 +263,7 @@ test("pill layout renders one grouped rounded capsule below the editor", async (
   }
 });
 
-test("responsive secondary content is owned exclusively by the footer", async () => {
+test("responsive secondary content is dropped without wrapping", async () => {
   const root = mkdtempSync(join(tmpdir(), "powerline-secondary-footer-"));
   writeFileSync(join(root, "settings.json"), JSON.stringify({
     powerline: {
@@ -295,8 +295,7 @@ test("responsive secondary content is owned exclusively by the footer", async ()
     const narrowFooter = runtime.footer!.render(16).join("\n");
     assert.match(narrowPrimary, /test/);
     assert.doesNotMatch(narrowPrimary, /ready/);
-    assert.match(narrowFooter, /review.*ready/);
-    assert.doesNotMatch(narrowFooter, /test/);
+    assert.equal(narrowFooter, "");
 
     const widePrimary = runtime.widgets.get("powerline-top")!.render(200).join("\n");
     assert.equal(runtime.footer!.render(200).length, 0, "footer returns no fabricated blank line without overflow");
@@ -305,7 +304,7 @@ test("responsive secondary content is owned exclusively by the footer", async ()
     await fake.commands.get("powerline")!.handler("placement above", runtime.ctx);
     assert.equal(runtime.widgetPlacements.get("powerline-top"), "aboveEditor");
     assert.equal(runtime.widgets.has("powerline-secondary"), false);
-    assert.match(runtime.footer!.render(16).join("\n"), /review.*ready/);
+    assert.equal(runtime.footer!.render(16).join("\n"), "");
 
     await fake.commands.get("powerline")!.handler("", runtime.ctx);
     assert.equal(runtime.footer, undefined, "disable restores Pi's footer");
@@ -313,7 +312,7 @@ test("responsive secondary content is owned exclusively by the footer", async ()
     await fake.commands.get("powerline")!.handler("", runtime.ctx);
     assert.ok(runtime.footer, "re-enable reinstalls the custom footer");
     assert.equal(runtime.widgets.has("powerline-secondary"), false);
-    assert.match(runtime.footer!.render(16).join("\n"), /review.*ready/);
+    assert.equal(runtime.footer!.render(16).join("\n"), "");
   } finally {
     await fake.handlers.get("session_shutdown")?.({}, runtime.ctx);
     restoreEnv();
@@ -353,11 +352,11 @@ async function renderSecondaryOverflowFooter(secondaryOverflow: string | undefin
   }
 }
 
-test("secondary overflow drops the row tail by default and wraps it onto extra rows when opted in", async () => {
+test("secondary overflow drops non-fitting rows by default and wraps when opted in", async () => {
   const visibleRows = (rows: string[]) => rows.map((row) => row.replace(/\x1b\[[0-9;]*m/g, "").trim());
 
-  assert.deepEqual(visibleRows(await renderSecondaryOverflowFooter(undefined, 16)), ["alpha-one"]);
-  assert.deepEqual(visibleRows(await renderSecondaryOverflowFooter("drop", 16)), ["alpha-one"]);
+  assert.deepEqual(visibleRows(await renderSecondaryOverflowFooter(undefined, 16)), []);
+  assert.deepEqual(visibleRows(await renderSecondaryOverflowFooter("drop", 16)), []);
   assert.deepEqual(
     visibleRows(await renderSecondaryOverflowFooter("wrap", 16)),
     ["alpha-one", "bravo-two", "charlie-3"],
