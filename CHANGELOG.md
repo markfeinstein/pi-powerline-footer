@@ -14,7 +14,7 @@
 - **Reported subscription cost** — `cost.subscriptionDisplay: "reported-cost"` now shows `$0.00` when a subscription session has no reported charge instead of falling back to `(sub)`.
 
 ### Fixed
-- **Completed timer rendering** — Keep the turn count and elapsed time in a `Waiting` border after Pi removes its active status indicator.
+- **Completed timer rendering** — Keep the turn count and elapsed time in the editor border without retaining Pi's idle `Waiting` label after the active status disappears.
 - **Auto-compaction icon** — Replaced the magic-wand glyph with collapse arrows so the context pill clearly indicates compaction.
 - **Subscription pill spacing** — Removed the extra trailing space between `(sub)` and the pill's closing cap.
 

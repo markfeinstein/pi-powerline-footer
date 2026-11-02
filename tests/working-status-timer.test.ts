@@ -26,7 +26,8 @@ test("renders the completed timer after Pi removes its status indicator", () => 
   const rendered = renderCompletedWorkingStatusBorder((text) => `\x1b[35m${text}\x1b[0m`, 40, "#2 ◷ 21s");
   assert.ok(rendered);
   const plain = stripAnsi(rendered);
-  assert.match(plain, /── Waiting #2 ◷ 21s ─/);
+  assert.match(plain, /#2 ◷ 21s/);
+  assert.ok(!plain.includes("Waiting"), "completed status should not keep Pi's idle label");
   assert.equal(visibleWidth(rendered), 40);
 });
 
