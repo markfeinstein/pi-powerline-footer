@@ -123,6 +123,16 @@ export function appendWorkingStatusSuffix(line: string, suffix: string): string 
   return `${withoutReset.slice(0, trailingRule.index)}${label}${remainingRule}${reset}`;
 }
 
+export function renderCompletedWorkingStatusBorder(borderColor: (text: string) => string, width: number, suffix: string): string | null {
+  const status = "Waiting";
+  const prefix = `── ${status}`;
+  const ruleWidth = width - visibleWidth(`${prefix} `);
+  if (ruleWidth <= visibleWidth(`${suffix} `)) return null;
+
+  const line = borderColor(prefix) + borderColor(` ${"─".repeat(ruleWidth)}`);
+  return appendWorkingStatusSuffix(line, suffix);
+}
+
 export class BashModeEditor extends CustomEditor {
   private readonly keybindingsRef: KeybindingsManager;
   private readonly optionsRef: BashModeEditorOptions;
@@ -156,10 +166,14 @@ export class BashModeEditor extends CustomEditor {
    * plain rule over it.
    */
   renderEmbeddedTopBorder(width: number): string | null {
-    if (!this.embedWorkingStatus || Reflect.get(this, "workingStatusIndicator") == null) return null;
+    if (!this.embedWorkingStatus) return null;
+    const suffix = this.optionsRef.getWorkingStatusSuffix?.();
+    const workingStatusIndicator = Reflect.get(this, "workingStatusIndicator");
+    if (workingStatusIndicator == null) {
+      return suffix ? renderCompletedWorkingStatusBorder(this.borderColor.bind(this), width, suffix) : null;
+    }
     const scrollOffset = Reflect.get(this, "scrollOffset");
     const line = this.renderTopBorder(width, typeof scrollOffset === "number" ? scrollOffset : 0);
-    const suffix = this.optionsRef.getWorkingStatusSuffix?.();
     return suffix ? appendWorkingStatusSuffix(line, suffix) : line;
   }
 

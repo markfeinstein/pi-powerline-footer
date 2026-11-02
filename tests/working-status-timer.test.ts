@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { visibleWidth } from "@earendil-works/pi-tui";
-import { appendWorkingStatusSuffix } from "../bash-mode/editor.ts";
+import { appendWorkingStatusSuffix, renderCompletedWorkingStatusBorder } from "../bash-mode/editor.ts";
 
 const stripAnsi = (text: string) => text.replace(/\x1b\[[0-9;]*m/g, "");
 const source = readFileSync(new URL("../index.ts", import.meta.url), "utf-8");
@@ -20,6 +20,14 @@ test("appends the working timer inside the editor border", () => {
 test("leaves a narrow border unchanged when the timer cannot fit", () => {
   const border = "── Waiting─";
   assert.equal(appendWorkingStatusSuffix(border, "21s"), border);
+});
+
+test("renders the completed timer after Pi removes its status indicator", () => {
+  const rendered = renderCompletedWorkingStatusBorder((text) => `\x1b[35m${text}\x1b[0m`, 40, "#2 ◷ 21s");
+  assert.ok(rendered);
+  const plain = stripAnsi(rendered);
+  assert.match(plain, /── Waiting #2 ◷ 21s ─/);
+  assert.equal(visibleWidth(rendered), 40);
 });
 
 test("resets the working timer and increments the turn for each agent turn", () => {
