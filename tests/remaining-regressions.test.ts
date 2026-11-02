@@ -235,6 +235,7 @@ test("editor-adjacent widgets cache queue and last-prompt work", () => {
   assert.match(source, /queueSummaryCache = null;\r?\n\s+requestImmediateStatusRender/);
   assert.match(source, /lastPromptRenderCache\.source === lastUserPrompt/);
   assert.match(source, /setWidget\("powerline-last-prompt"[\s\S]*?placement: "belowEditor"/);
+  assert.match(source, /\), ""\]\n\s+: \[\];/);
   assert.ok(source.indexOf('setWidget("powerline-last-prompt", ()') < source.indexOf('setWidget("powerline-top", (_tui') , "last prompt should render before the below-editor status row");
 });
 

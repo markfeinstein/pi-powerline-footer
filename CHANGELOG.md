@@ -9,6 +9,7 @@
 - **Token-only context display** — Set `context.format` to `"tokens"` to show used context versus the model window without the redundant percentage.
 
 ### Changed
+- **Last prompt spacing** — Add a blank row between the last user prompt and the below-editor status line.
 - **Last prompt placement** — Render the last user prompt between the editor and the below-editor status line.
 - **Thinking label** — Replaced the `think:` prefix with a brain emoji for a more compact status segment.
 - **Context and cache icons** — Use a memory symbol for the context window and a cached/refresh symbol for prompt-cache statistics instead of two identical database symbols.

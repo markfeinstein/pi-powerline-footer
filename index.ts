@@ -3233,7 +3233,7 @@ export default function powerlineFooter(pi: ExtensionAPI) {
     const prefix = ` ${color}↳${ansi.reset} `;
     const availableWidth = width - visibleWidth(prefix);
     const lines = compact && availableWidth >= 10
-      ? [truncateToWidth(`${prefix}${color}${truncateToWidth(compact, availableWidth, "…")}${ansi.reset}`, width, "…")]
+      ? [truncateToWidth(`${prefix}${color}${truncateToWidth(compact, availableWidth, "…")}${ansi.reset}`, width, "…"), ""]
       : [];
 
     lastPromptRenderCache = { source: lastUserPrompt, compact, width, color, lines };
