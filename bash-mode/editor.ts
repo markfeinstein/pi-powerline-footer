@@ -124,7 +124,12 @@ export function appendWorkingStatusSuffix(line: string, suffix: string): string 
 }
 
 export function renderCompletedWorkingStatusBorder(borderColor: (text: string) => string, width: number, suffix: string): string | null {
-  const line = borderColor("─".repeat(width));
+  const status = "Done";
+  const prefix = `── ${status}`;
+  const ruleWidth = width - visibleWidth(`${prefix} `);
+  if (ruleWidth <= visibleWidth(`${suffix} `)) return null;
+
+  const line = borderColor(prefix) + borderColor(` ${"─".repeat(ruleWidth)}`);
   return appendWorkingStatusSuffix(line, suffix);
 }
 
