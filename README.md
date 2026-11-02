@@ -289,7 +289,15 @@ For a compact current footer setup:
 }
 ```
 
-Use `"model": { "display": "qualified" }` when two providers expose models with the same display name.
+Use `"model": { "display": "qualified" }` when two providers expose models with the same display name. Name mode uses a provider-specific icon and a compact family-first label:
+
+| Provider | Icon | Example rewrite |
+|----------|------|-----------------|
+| GitHub Copilot | GitHub | `GPT-5.6 Sol` → `Sol 5.6` |
+| OpenAI / OpenAI Codex | OpenAI | `GPT-5.6 Luna` → `Luna 5.6` |
+| Anthropic / Claude Code | Claude | `Claude Opus 5.5` → `Opus 5.5` |
+
+Unknown providers retain the generic model chip. Qualified mode keeps the exact provider/model id while still using the provider icon. Terminals without Nerd Fonts use short `GH`, `OA`, and `AN` provider labels.
 
 `cost.currency` accepts `USD`, `CNY`, `EUR`, `GBP`, `JPY`, `CAD`, `AUD`, `CHF`, `INR`, or `KRW`. Pi reports costs in USD; non-USD display uses a keyless USD FX rate fetched in the background and cached for 24 hours under the Pi agent directory. If no cached rate is available yet, the cost segment renders `-- CODE` until a later footer refresh can use the fetched rate.
 

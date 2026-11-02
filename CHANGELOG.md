@@ -4,6 +4,7 @@
 
 ### Added
 - **Rounded pill layout** — Set `powerline.pills` to render segments as truecolor capsules with Nerd Font caps, per-segment colors, adjacent segment grouping, optional foreground overrides, bold text, and responsive group-aware overflow.
+- **Provider-aware model display** — Show GitHub, OpenAI, or Claude provider icons and compact family-first names such as `Sol 5.6` and `Opus 5.5`, with generic fallbacks for other providers.
 
 ### Changed
 - **Thinking label** — Replaced the `think:` prefix with a brain emoji for a more compact status segment.

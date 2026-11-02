@@ -44,21 +44,102 @@ function formatDuration(ms: number): string {
 // Segment Implementations
 // ═══════════════════════════════════════════════════════════════════════════
 
+type ModelInfo = NonNullable<SegmentContext["model"]>;
+
+function normalizeProviderId(model: ModelInfo): string {
+  return (model.provider || model.providerId || model.providerName || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[\s_]+/g, "-");
+}
+
+function providerIcon(icons: IconSet, model: ModelInfo): string {
+  switch (normalizeProviderId(model)) {
+    case "github":
+    case "github-copilot":
+    case "copilot":
+      return icons.providerGithub;
+    case "openai":
+    case "openai-codex":
+      return icons.providerOpenai;
+    case "anthropic":
+    case "claude-code":
+      return icons.providerAnthropic;
+    default:
+      return icons.model;
+  }
+}
+
+function titleCaseModelFamily(value: string): string {
+  return value
+    .split(/[\s-]+/)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1).toLowerCase())
+    .join(" ");
+}
+
+function compactCatalogModelName(name: string): string {
+  const normalized = name.trim().replace(/^(?:OpenAI|Anthropic)\s*:\s*/i, "");
+
+  const claudeFamilyFirst = /^Claude\s+(Opus|Sonnet|Haiku|Fable|Mythos)\s+(\d+(?:\.\d+)*)(.*)$/i.exec(normalized);
+  if (claudeFamilyFirst) {
+    return `${titleCaseModelFamily(claudeFamilyFirst[1]!)} ${claudeFamilyFirst[2]}${claudeFamilyFirst[3]}`;
+  }
+
+  const claudeVersionFirst = /^Claude\s+(\d+(?:\.\d+)*)\s+(Opus|Sonnet|Haiku|Fable|Mythos)(.*)$/i.exec(normalized);
+  if (claudeVersionFirst) {
+    return `${titleCaseModelFamily(claudeVersionFirst[2]!)} ${claudeVersionFirst[1]}${claudeVersionFirst[3]}`;
+  }
+
+  const namedGpt = /^GPT[- ](\d+(?:\.\d+)*)\s+(.+)$/i.exec(normalized);
+  if (namedGpt) {
+    const familyWithQualifier = /^(.*?)(\s+\([^)]*\))?$/.exec(namedGpt[2]!.trim());
+    const family = titleCaseModelFamily(familyWithQualifier?.[1] ?? namedGpt[2]!);
+    return `${family} ${namedGpt[1]}${familyWithQualifier?.[2] ?? ""}`;
+  }
+
+  const plainGpt = /^GPT[- ](\d+(?:\.\d+)*)$/i.exec(normalized);
+  if (plainGpt) return `GPT ${plainGpt[1]}`;
+
+  return normalized.startsWith("Claude ") ? normalized.slice(7) : normalized;
+}
+
+function compactModelId(id: string): string {
+  const leaf = id.split("/").at(-1) ?? id;
+
+  const gpt = /^gpt-(\d+(?:\.\d+)*?)-(.+)$/i.exec(leaf);
+  if (gpt) {
+    const family = gpt[2]!.replace(/-\d{8}$/, "");
+    return `${titleCaseModelFamily(family)} ${gpt[1]}`;
+  }
+
+  const claude = /^claude-(opus|sonnet|haiku|fable|mythos)-(\d+)(?:[.-](\d+))?/i.exec(leaf);
+  if (claude) {
+    const version = claude[3] ? `${claude[2]}.${claude[3]}` : claude[2]!;
+    return `${titleCaseModelFamily(claude[1]!)} ${version}`;
+  }
+
+  return id;
+}
+
+function compactModelLabel(model: ModelInfo): string {
+  return model.name?.trim() ? compactCatalogModelName(model.name) : compactModelId(model.id);
+}
+
 const modelSegment: StatusLineSegment = {
   id: "model",
   render(ctx) {
     const icons = getIcons();
     const opts = ctx.options.model ?? {};
 
-    let modelName = ctx.model?.name || ctx.model?.id || "no-model";
-    if (opts.display === "qualified" && ctx.model?.id) {
-      const provider = ctx.model.provider || ctx.model.providerId || ctx.model.providerName;
-      modelName = provider && !ctx.model.id.startsWith(`${provider}/`) ? `${provider}/${ctx.model.id}` : ctx.model.id;
-    } else if (modelName.startsWith("Claude ")) {
-      modelName = modelName.slice(7);
+    const model = ctx.model;
+    let modelName = model ? compactModelLabel(model) : "no-model";
+    if (opts.display === "qualified" && model?.id) {
+      const provider = model.provider || model.providerId || model.providerName;
+      modelName = provider && !model.id.startsWith(`${provider}/`) ? `${provider}/${model.id}` : model.id;
     }
 
-    let content = withIcon(icons.model, modelName);
+    let content = withIcon(model ? providerIcon(icons, model) : icons.model, modelName);
 
     if (opts.showThinkingLevel !== false && ctx.model?.reasoning) {
       const level = ctx.thinkingLevel || "off";

@@ -3,6 +3,9 @@ import { loadThemeConfig } from "./theme.ts";
 export interface IconSet {
   pi: string;
   model: string;
+  providerGithub: string;
+  providerOpenai: string;
+  providerAnthropic: string;
   folder: string;
   branch: string;
   git: string;
@@ -55,7 +58,10 @@ export function getThinkingText(level: string): string | undefined {
 // Nerd Font icons (matching oh-my-pi exactly)
 export const NERD_ICONS: IconSet = {
   pi: "\uE22C",         // nf-oct-pi (stylized pi icon)
-  model: "\uEC19",      // nf-md-chip (model/AI chip)
+  model: "\uEC19",      // nf-cod-chip (generic model/AI chip)
+  providerGithub: "\uF09B",    // nf-fa-github
+  providerOpenai: "\uEC81",    // nf-cod-openai
+  providerAnthropic: "\uEC82", // nf-cod-claude
   folder: "\uF115",     // nf-fa-folder_open
   branch: "\uF126",     // nf-fa-code_fork (git branch)
   git: "\uF1D3",        // nf-fa-git (git logo)
@@ -80,6 +86,9 @@ export const NERD_ICONS: IconSet = {
 export const ASCII_ICONS: IconSet = {
   pi: "π",
   model: "",
+  providerGithub: "GH",
+  providerOpenai: "OA",
+  providerAnthropic: "AN",
   folder: "dir",
   branch: "⎇",
   git: "⎇",
