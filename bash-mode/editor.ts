@@ -113,7 +113,8 @@ export function appendWorkingStatusSuffix(line: string, suffix: string): string 
   const trailingRule = /─+$/.exec(withoutReset);
   if (!trailingRule || trailingRule.index === undefined) return line;
 
-  const label = ` ${suffix} `;
+  const separator = trailingRule.index > 0 && withoutReset[trailingRule.index - 1] === " " ? "" : " ";
+  const label = `${separator}${suffix} `;
   const labelWidth = visibleWidth(label);
   const ruleWidth = trailingRule[0].length;
   if (ruleWidth <= labelWidth) return line;

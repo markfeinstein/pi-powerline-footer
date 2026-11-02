@@ -13,6 +13,7 @@ test("appends the working timer inside the editor border", () => {
   const plain = stripAnsi(rendered);
 
   assert.match(plain, /── Waiting 21s ─/);
+  assert.ok(!plain.includes("Waiting  21s"), "status and timer should have one separator space");
   assert.equal(visibleWidth(rendered), visibleWidth(border));
 });
 
@@ -21,9 +22,11 @@ test("leaves a narrow border unchanged when the timer cannot fit", () => {
   assert.equal(appendWorkingStatusSuffix(border, "21s"), border);
 });
 
-test("resets the working timer for each agent turn", () => {
-  assert.match(source, /pi\.on\("agent_start"[\s\S]*?startWorkingStatusTimer\(\)/);
+test("resets the working timer and increments the turn for each agent turn", () => {
+  assert.match(source, /turnCount = 0/);
+  assert.match(source, /pi\.on\("agent_start"[\s\S]*?turnCount \+= 1[\s\S]*?startWorkingStatusTimer\(\)/);
   assert.match(source, /pi\.on\("agent_end"[\s\S]*?stopWorkingStatusTimer\(\)/);
   assert.match(source, /workingTurnStartTime = Date\.now\(\)/);
   assert.match(source, /Date\.now\(\) - workingTurnStartTime/);
+  assert.match(source, /`#\$\{turnCount\} \$\{getIcons\(\)\.time\}/);
 });

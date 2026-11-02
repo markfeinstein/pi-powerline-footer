@@ -1279,6 +1279,7 @@ export default function powerlineFooter(pi: ExtensionAPI) {
   let approximateContextUsage: CoreContextUsage | null = null;
   let isStreaming = false;
   let tuiRef: any = null;
+  let turnCount = 0;
   let workingTurnStartTime: number | null = null;
   let workingStatusTimer: ReturnType<typeof setInterval> | null = null;
   let restoreFooterStatusRepaintHook: (() => void) | null = null;
@@ -1910,6 +1911,7 @@ export default function powerlineFooter(pi: ExtensionAPI) {
     shellSession = null;
     sessionGeneration++;
     sessionStartTime = Date.now();
+    turnCount = 0;
     currentCtx = ctx;
     footerDataRef = null;
     footerDataCwd = null;
@@ -2150,6 +2152,7 @@ export default function powerlineFooter(pi: ExtensionAPI) {
   // Also dismiss welcome when agent starts responding (handles `p "command"` case)
   pi.on("agent_start", async (_event, ctx) => {
     isStreaming = true;
+    turnCount += 1;
     startWorkingStatusTimer();
     liveAssistantUsage = null;
     onVibeAgentStart();
@@ -3334,7 +3337,7 @@ export default function powerlineFooter(pi: ExtensionAPI) {
         keybindings,
         embedWorkingStatus: config.workingIndicatorPlacement === "editor-border",
         getWorkingStatusSuffix: () => isStreaming && workingTurnStartTime !== null
-          ? `${getIcons().time} ${formatDuration(Date.now() - workingTurnStartTime)}`
+          ? `#${turnCount} ${getIcons().time} ${formatDuration(Date.now() - workingTurnStartTime)}`
           : undefined,
         isBashModeActive: () => bashModeActive,
         isShellRunning: () => shellSession?.state.running ?? false,
