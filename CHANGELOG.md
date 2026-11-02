@@ -14,6 +14,7 @@
 - **Reported subscription cost** — `cost.subscriptionDisplay: "reported-cost"` now shows `$0.00` when a subscription session has no reported charge instead of falling back to `(sub)`.
 
 ### Fixed
+- **Auto-compaction icon** — Replaced the magic-wand glyph with collapse arrows so the context pill clearly indicates compaction.
 - **Subscription pill spacing** — Removed the extra trailing space between `(sub)` and the pill's closing cap.
 
 ## [0.22.0] - 2026-10-29

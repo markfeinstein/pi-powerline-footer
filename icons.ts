@@ -78,7 +78,7 @@ export const NERD_ICONS: IconSet = {
   output: "\uF08B",     // nf-fa-sign_out (output arrow)
   host: "\uF109",       // nf-fa-laptop (host)
   session: "\uF550",    // nf-md-identifier (session id)
-  auto: "\u{F0068}",    // nf-md-lightning_bolt (auto-compact)
+  auto: "\u{F0615}",    // nf-md-arrow_collapse (auto-compact)
   warning: "\uF071",    // nf-fa-warning
 };
 

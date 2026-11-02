@@ -5,6 +5,7 @@ import { hasNerdFonts, NERD_ICONS, setNerdFontsPreference } from "../icons.ts";
 test("context and cache use distinct Nerd Font symbols", () => {
   assert.equal(NERD_ICONS.context, "\u{F035B}");
   assert.equal(NERD_ICONS.cache, "\u{F00E8}");
+  assert.equal(NERD_ICONS.auto, "\u{F0615}");
   assert.notEqual(NERD_ICONS.context, NERD_ICONS.cache);
 });
 
