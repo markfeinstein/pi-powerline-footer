@@ -1,10 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
-import { homedir, tmpdir } from "node:os";
-import { join } from "node:path";
-import { collectHiddenExtensionStatusKeys, getNotificationExtensionStatuses, normalizeExtensionStatusValue, parsePowerlineConfig, mergeSegmentOptions, mergeSegmentsWithCustomItems, nextPowerlineSettingWithOptions, nextPowerlineSettingWithPreset, normalizeCompactExtensionStatus, stripTerminalControlSequences } from "../powerline-config.ts";
-import { renderSegment } from "../segments.ts";
+import { collectHiddenExtensionStatusKeys, getNotificationExtensionStatuses, normalizeExtensionStatusValue, parsePowerlineConfig, mergeSegmentOptions, mergeSegmentsWithCustomItems, nextPowerlineSettingWithOptions, nextPowerlineSettingWithPreset, normalizeCompactExtensionStatus } from "../powerline-config.ts";
+import { getSeparator } from "../separators.ts";
+import { PRESETS } from "../presets.ts";
+
+test("fixed custom preset is removed in favor of powerline.layout", () => {
+  assert.equal("custom" in PRESETS, false);
+});
 
 test("parsePowerlineConfig supports object config with custom items", () => {
   const config = parsePowerlineConfig(
@@ -24,65 +26,273 @@ test("parsePowerlineConfig supports object config with custom items", () => {
   assert.equal(config.customItems[0].statusKey, "ci-status");
   assert.equal(config.customItems[1].statusKey, "review");
   assert.equal(config.customItems[1].hideWhenMissing, false);
-  assert.equal(config.mouseScroll, true);
-  assert.equal(config.fixedEditor, true);
+  assert.equal(config.customItems[0].selfColorize, false);
+  assert.deepEqual(config.disabledSegments, []);
+  assert.deepEqual(config.invalidDisabledSegments, []);
+  assert.equal(config.layout, null);
+  assert.deepEqual(config.invalidLayoutSegments, []);
+  assert.equal(config.separator, null);
+  assert.equal(config.placement, "above");
+  assert.equal(config.invalidPlacement, null);
   assert.equal(config.welcome, true);
   assert.equal(config.stashSharpSShortcut, false);
+  assert.deepEqual(config.queue, { compactPromptMode: "queue" });
 });
 
-test("parsePowerlineConfig supports disabling mouse scroll", () => {
+test("parsePowerlineConfig accepts self-colored custom items", () => {
+  const config = parsePowerlineConfig({ customItems: [{ id: "usage", color: "warning", selfColorize: true }] }, ["default"]);
+
+  assert.deepEqual(config.customItems, [{
+    id: "usage",
+    statusKey: "usage",
+    position: "right",
+    color: "warning",
+    selfColorize: true,
+    prefix: undefined,
+    hideWhenMissing: true,
+    excludeFromExtensionStatuses: true,
+  }]);
+});
+
+test("parsePowerlineConfig supports disabled segments", () => {
   const config = parsePowerlineConfig(
-    { preset: "compact", mouseScroll: false },
+    {
+      preset: "default",
+      customItems: [{ id: "ci" }],
+      disabledSegments: [
+        "queue",
+        "cost",
+        " extension_statuses ",
+        "custom:ci",
+        "cost",
+        "unknown",
+        "custom:missing",
+        123,
+      ],
+    },
     ["default", "compact"],
   );
 
-  assert.equal(config.preset, "compact");
-  assert.equal(config.mouseScroll, false);
+  assert.deepEqual(config.disabledSegments, ["queue", "cost", "extension_statuses", "custom:ci"]);
+  assert.deepEqual(config.invalidDisabledSegments, ["unknown", "custom:missing", "123"]);
 });
 
-test("parsePowerlineConfig supports disabling fixed editor", () => {
+test("parsePowerlineConfig supports partial explicit layout rows", () => {
   const config = parsePowerlineConfig(
-    { preset: "compact", fixedEditor: false },
+    {
+      preset: "default",
+      customItems: [{ id: "ci" }],
+      layout: {
+        left: ["model", "custom:ci", "model", "unknown", 123],
+        right: ["model", "cost"],
+        secondary: [],
+      },
+    },
     ["default", "compact"],
   );
 
-  assert.equal(config.preset, "compact");
-  assert.equal(config.fixedEditor, false);
+  assert.deepEqual(config.layout, {
+    left: ["model", "custom:ci"],
+    right: ["cost"],
+    secondary: [],
+  });
+  assert.deepEqual(config.invalidLayoutSegments, ["left:unknown", "left:123", "right:model"]);
 });
 
-test("parsePowerlineConfig supports welcome and legacy sharp-S toggles", () => {
-  const disabled = parsePowerlineConfig(
+test("parsePowerlineConfig preserves reporter layout groups", () => {
+  const config = parsePowerlineConfig(
+    {
+      preset: "default",
+      layout: {
+        left: ["model"],
+        right: ["path"],
+        secondary: ["thinking"],
+      },
+    },
+    ["default", "compact"],
+  );
+
+  assert.deepEqual(config.layout, {
+    left: ["model"],
+    right: ["path"],
+    secondary: ["thinking"],
+  });
+  assert.deepEqual(config.invalidLayoutSegments, []);
+  assert.deepEqual(
+    mergeSegmentsWithCustomItems(PRESETS.default, config.customItems, {
+      layout: config.layout,
+      disabledSegments: config.disabledSegments,
+    }),
+    {
+      leftSegments: ["model"],
+      rightSegments: ["path"],
+      secondarySegments: ["thinking"],
+    },
+  );
+});
+
+test("parsePowerlineConfig supports separator overrides", () => {
+  const config = parsePowerlineConfig(
+    { preset: "default", separator: " chevron " },
+    ["default", "compact"],
+  );
+  const invalid = parsePowerlineConfig(
+    { preset: "default", separator: "sparkle" },
+    ["default", "compact"],
+  );
+
+  assert.equal(config.separator, "chevron");
+  assert.equal(invalid.separator, null);
+});
+
+test("configured separators resolve independently of presets", () => {
+  const presetSeparator = getSeparator(PRESETS.default.separator).left;
+  const configuredSeparator = getSeparator("chevron").left;
+
+  assert.notEqual(configuredSeparator, presetSeparator);
+  assert.equal(configuredSeparator, "›");
+});
+
+for (const [style, glyph] of [["pipe", "|"], ["slash", "/"]] as const) {
+  test(`${style} separator leaves padding to the footer renderer`, () => {
+    const separator = getSeparator(style);
+    assert.equal(separator.left, glyph);
+    assert.equal(separator.right, glyph);
+    // The renderer adds one space on each side; layout budgets the same two columns.
+    const rendered = ["model", "directory"].join(` ${separator.left} `);
+    assert.equal(rendered, `model ${glyph} directory`);
+    assert.equal(separator.left.length + 2, 3);
+  });
+}
+
+test("parsePowerlineConfig validates primary powerline placement", () => {
+  const below = parsePowerlineConfig(
+    { preset: "compact", placement: "below" },
+    ["default", "compact"],
+  );
+  const invalid = parsePowerlineConfig(
+    { preset: "compact", placement: "sideways" },
+    ["default", "compact"],
+  );
+
+  assert.equal(below.placement, "below");
+  assert.equal(below.invalidPlacement, null);
+  assert.equal(invalid.placement, "above");
+  assert.equal(invalid.invalidPlacement, "sideways");
+});
+
+test("parsePowerlineConfig validates outer padding without coercion", () => {
+  for (const padding of [0, 1, 2, 8]) {
+    assert.equal(parsePowerlineConfig({ padding }, ["default"]).padding, padding);
+  }
+  for (const padding of [undefined, null, -1, 9, 1.5, NaN, Infinity, -Infinity, "0", true, [], {}]) {
+    assert.equal(parsePowerlineConfig({ padding }, ["default"]).padding, 1);
+  }
+  for (const value of [undefined, null, {}, "compact"]) {
+    assert.equal(parsePowerlineConfig(value, ["default", "compact"]).padding, 1);
+  }
+});
+
+test("parsePowerlineConfig validates git status refresh TTL without coercion", () => {
+  for (const ttl of [0, 1, 10_000]) {
+    assert.equal(parsePowerlineConfig({ git: { statusTtlMs: ttl } }, ["default"]).segmentOptions.git?.statusTtlMs, ttl);
+  }
+  for (const invalid of [undefined, null, -1, NaN, Infinity, -Infinity, "1000", true, [], {}]) {
+    assert.deepEqual(parsePowerlineConfig({ git: { statusTtlMs: invalid } }, ["default"]).segmentOptions, { git: {} });
+  }
+});
+
+test("parsePowerlineConfig validates secondary overflow mode", () => {
+  const unset = parsePowerlineConfig({}, ["default"]);
+  const wrap = parsePowerlineConfig({ secondaryOverflow: " Wrap " }, ["default"]);
+  const invalid = parsePowerlineConfig({ secondaryOverflow: "scroll" }, ["default"]);
+
+  assert.equal(unset.secondaryOverflow, "drop");
+  assert.equal(unset.invalidSecondaryOverflow, null);
+  assert.equal(wrap.secondaryOverflow, "wrap");
+  assert.equal(wrap.invalidSecondaryOverflow, null);
+  assert.equal(invalid.secondaryOverflow, "drop");
+  assert.equal(invalid.invalidSecondaryOverflow, "scroll");
+});
+
+test("parsePowerlineConfig validates working indicator placement", () => {
+  const unset = parsePowerlineConfig({}, ["default"]);
+  const above = parsePowerlineConfig({ workingIndicatorPlacement: " Above-Powerline " }, ["default"]);
+  const invalid = parsePowerlineConfig({ workingIndicatorPlacement: "below" }, ["default"]);
+
+  assert.equal(unset.workingIndicatorPlacement, "editor-border");
+  assert.equal(unset.invalidWorkingIndicatorPlacement, null);
+  assert.equal(above.workingIndicatorPlacement, "above-powerline");
+  assert.equal(above.invalidWorkingIndicatorPlacement, null);
+  assert.equal(invalid.workingIndicatorPlacement, "editor-border");
+  assert.equal(invalid.invalidWorkingIndicatorPlacement, "below");
+});
+
+test("parsePowerlineConfig supports queue compact prompt mode", () => {
+  const defaultConfig = parsePowerlineConfig({}, ["default", "compact"]);
+  const native = parsePowerlineConfig(
+    { queue: { compactPromptMode: "native" } },
+    ["default", "compact"],
+  );
+  const invalid = parsePowerlineConfig(
+    { queue: { compactPromptMode: "passthrough" } },
+    ["default", "compact"],
+  );
+  const shorthand = parsePowerlineConfig("compact", ["default", "compact"]);
+
+  assert.deepEqual(defaultConfig.queue, { compactPromptMode: "queue" });
+  assert.deepEqual(native.queue, { compactPromptMode: "native" });
+  assert.deepEqual(invalid.queue, { compactPromptMode: "queue" });
+  assert.deepEqual(shorthand.queue, { compactPromptMode: "queue" });
+});
+
+test("parsePowerlineConfig supports welcome and legacy sharp-S settings", () => {
+  const config = parsePowerlineConfig(
     { preset: "compact", welcome: false, stashSharpSShortcut: true },
     ["default", "compact"],
   );
   const shorthand = parsePowerlineConfig("compact", ["default", "compact"]);
 
-  assert.equal(disabled.welcome, false);
-  assert.equal(disabled.stashSharpSShortcut, true);
+  assert.equal(config.welcome, false);
+  assert.equal(config.stashSharpSShortcut, true);
   assert.equal(shorthand.welcome, true);
   assert.equal(shorthand.stashSharpSShortcut, false);
 });
-
 test("parsePowerlineConfig extracts supported segment options", () => {
   const config = parsePowerlineConfig(
     {
       preset: "default",
       model: { showThinkingLevel: true, display: "qualified" },
       path: { mode: "full", maxLength: 120 },
-      git: { showBranch: false, showStaged: false, showUnstaged: true, showUntracked: false, polling: "branch" },
+      git: { showBranch: false, showStaged: false, showUnstaged: true, showUntracked: false, polling: "branch", hostIcon: true },
       time: { format: "12h", showSeconds: true },
-      cost: { subscriptionDisplay: "both" },
+      cost: { subscriptionDisplay: "both", currency: "cny" },
+      workingVibes: { color: "rainbow" },
     },
+    ["default", "compact"],
+  );
+  const invalidCurrency = parsePowerlineConfig(
+    { cost: { currency: "BTC" } },
     ["default", "compact"],
   );
 
   assert.deepEqual(config.segmentOptions, {
     model: { showThinkingLevel: true, display: "qualified" },
     path: { mode: "full", maxLength: 120 },
-    git: { showBranch: false, showStaged: false, showUnstaged: true, showUntracked: false, polling: "branch" },
+    git: { showBranch: false, showStaged: false, showUnstaged: true, showUntracked: false, polling: "branch", hostIcon: true },
     time: { format: "12h", showSeconds: true },
-    cost: { subscriptionDisplay: "both" },
+    cost: { subscriptionDisplay: "both", currency: "CNY" },
   });
+  assert.deepEqual(config.workingVibes, { color: "rainbow" });
+  assert.deepEqual(invalidCurrency.segmentOptions, { cost: {} });
+});
+
+test("parsePowerlineConfig accepts working-vibe theme colors and hex colors", () => {
+  const semantic = parsePowerlineConfig({ workingVibes: { color: "warning" } }, ["default"]);
+  const hex = parsePowerlineConfig({ workingVibes: { color: "#89d281" } }, ["default"]);
+
+  assert.deepEqual(semantic.workingVibes, { color: "warning" });
+  assert.deepEqual(hex.workingVibes, { color: "#89d281" });
 });
 
 test("mergeSegmentOptions lets user config override preset segment defaults", () => {
@@ -97,6 +307,8 @@ test("mergeSegmentOptions lets user config override preset segment defaults", ()
       git: { showBranch: true, showUntracked: false },
       time: {},
       cost: { subscriptionDisplay: "reported-cost" },
+      context: {},
+      cache_read: {},
     },
   );
 });
@@ -121,6 +333,53 @@ test("mergeSegmentsWithCustomItems appends custom segment ids by position", () =
   assert.deepEqual(merged.secondarySegments, ["extension_statuses", "custom:review"]);
 });
 
+test("mergeSegmentsWithCustomItems filters disabled segment ids", () => {
+  const merged = mergeSegmentsWithCustomItems(
+    {
+      leftSegments: ["path", "model"],
+      rightSegments: ["git", "cost"],
+      secondarySegments: ["extension_statuses"],
+      separator: "powerline",
+    },
+    [
+      { id: "ci", statusKey: "ci", position: "left", hideWhenMissing: true, excludeFromExtensionStatuses: true },
+      { id: "timer", statusKey: "timer", position: "right", hideWhenMissing: true, excludeFromExtensionStatuses: true },
+      { id: "review", statusKey: "review", position: "secondary", hideWhenMissing: true, excludeFromExtensionStatuses: true },
+    ],
+    { disabledSegments: ["model", "cost", "custom:ci", "custom:review"] },
+  );
+
+  assert.deepEqual(merged.leftSegments, ["path"]);
+  assert.deepEqual(merged.rightSegments, ["git", "custom:timer"]);
+  assert.deepEqual(merged.secondarySegments, ["extension_statuses"]);
+});
+
+test("mergeSegmentsWithCustomItems applies partial layout rows before disabled filtering", () => {
+  const merged = mergeSegmentsWithCustomItems(
+    {
+      leftSegments: ["path", "model"],
+      rightSegments: ["git", "cost", "extension_statuses"],
+      secondarySegments: ["extension_statuses"],
+      separator: "powerline",
+    },
+    [
+      { id: "ci", statusKey: "ci", position: "right", hideWhenMissing: true, excludeFromExtensionStatuses: true },
+      { id: "review", statusKey: "review", position: "secondary", hideWhenMissing: true, excludeFromExtensionStatuses: true },
+    ],
+    {
+      layout: {
+        left: ["model", "custom:ci", "extension_statuses"],
+        secondary: [],
+      },
+      disabledSegments: ["model"],
+    },
+  );
+
+  assert.deepEqual(merged.leftSegments, ["custom:ci", "extension_statuses"]);
+  assert.deepEqual(merged.rightSegments, ["git", "cost"]);
+  assert.deepEqual(merged.secondarySegments, []);
+});
+
 test("nextPowerlineSettingWithPreset preserves object settings", () => {
   const updated = nextPowerlineSettingWithPreset({ preset: "default", customItems: [{ id: "ci" }] }, "compact");
   if (typeof updated !== "object" || updated === null || Array.isArray(updated)) {
@@ -139,24 +398,18 @@ test("nextPowerlineSettingWithPreset preserves object settings", () => {
 
 test("nextPowerlineSettingWithOptions preserves object settings", () => {
   const updated = nextPowerlineSettingWithOptions(
-    { preset: "default", customItems: [{ id: "ci" }], mouseScroll: false },
-    { fixedEditor: false },
+    { preset: "default", customItems: [{ id: "ci" }] },
+    { placement: "below" },
     "compact",
   );
-  if (typeof updated !== "object" || updated === null || Array.isArray(updated)) {
-    assert.fail("expected an object powerline setting");
-  }
 
-  assert.equal(updated.preset, "default");
-  assert.equal(updated.fixedEditor, false);
-  assert.equal(updated.mouseScroll, false);
-  assert.deepEqual(updated.customItems, [{ id: "ci" }]);
+  assert.deepEqual(updated, { preset: "default", customItems: [{ id: "ci" }], placement: "below" });
 });
 
 test("nextPowerlineSettingWithOptions converts string presets to object settings", () => {
-  assert.deepEqual(nextPowerlineSettingWithOptions("compact", { mouseScroll: true }, "compact"), {
+  assert.deepEqual(nextPowerlineSettingWithOptions("compact", { placement: "below" }, "compact"), {
     preset: "compact",
-    mouseScroll: true,
+    placement: "below",
   });
 });
 
@@ -170,173 +423,37 @@ test("collectHiddenExtensionStatusKeys includes default custom status keys", () 
   assert.equal(hidden.has("review"), false);
 });
 
+test("hiddenExtensionStatusKeys hides keys without declaring custom items", () => {
+  const config = parsePowerlineConfig({ hiddenExtensionStatusKeys: [" mcp ", "lsp", "mcp", 42, ""] }, ["default"]);
+  assert.deepEqual(config.hiddenExtensionStatusKeys, ["mcp", "lsp"]);
+
+  const hidden = collectHiddenExtensionStatusKeys([], config.hiddenExtensionStatusKeys);
+  assert.equal(hidden.has("mcp"), true);
+  assert.equal(hidden.has("lsp"), true);
+  assert.deepEqual(getNotificationExtensionStatuses(new Map([["mcp", "[mcp] 3 servers"]]), hidden), []);
+});
+
+test("hiddenExtensionStatusKeys defaults to empty for invalid values", () => {
+  assert.deepEqual(parsePowerlineConfig({ hiddenExtensionStatusKeys: "mcp" }, ["default"]).hiddenExtensionStatusKeys, []);
+});
+
 test("normalizeCompactExtensionStatus strips baked-in trailing separators", () => {
   assert.equal(normalizeCompactExtensionStatus("CI ok · "), "CI ok");
   assert.equal(normalizeCompactExtensionStatus("CI ok |   "), "CI ok");
   assert.equal(normalizeCompactExtensionStatus("[notice] queued"), null);
 });
 
-test("extension status normalization strips terminal control sequences", () => {
-  assert.equal(normalizeExtensionStatusValue("\x1b[31mCI ok\x1b[0m · "), "CI ok");
-  assert.equal(normalizeExtensionStatusValue("safe\x1b]52;c;secret\x07 text"), "safe text");
-  assert.equal(normalizeCompactExtensionStatus("\x1b[33m[notice] queued\x1b[0m"), null);
-});
-
 test("normalizeExtensionStatusValue keeps notification-style statuses renderable for custom items", () => {
   assert.equal(normalizeExtensionStatusValue("[review] queued · "), "[review] queued");
-});
-
-test("path segment abbreviated mode clamps maxLength one to a single ellipsis", () => {
-  const rendered = renderSegment("path", {
-    cwd: "/very/long/path/here",
-    shellModeActive: false,
-    options: { path: { mode: "abbreviated", maxLength: 1 } },
-    theme: {} as never,
-    colors: {} as never,
-    model: null,
-    thinkingLevel: "off",
-    git: { branch: null, staged: 0, unstaged: 0, untracked: 0 },
-    extensionStatuses: new Map(),
-    customItemsById: new Map(),
-  });
-
-  assert.equal(rendered.visible, true);
-  assert.equal(rendered.content.includes("/very/long/path/here"), false);
-  assert.equal(rendered.content.includes("…"), true);
-});
-
-function renderPathName(cwd: string): string {
-  const rendered = renderSegment("path", {
-    cwd,
-    shellModeActive: false,
-    options: { path: { mode: "basename" } },
-    theme: {} as never,
-    colors: {} as never,
-    model: null,
-    thinkingLevel: "off",
-    git: { branch: null, staged: 0, unstaged: 0, untracked: 0 },
-    extensionStatuses: new Map(),
-    customItemsById: new Map(),
-  });
-
-  assert.equal(rendered.visible, true);
-  return stripTerminalControlSequences(rendered.content).replace(/^\S+\s+/, "");
-}
-
-test("path segment basename includes repository folder for bare linked worktree roots", () => {
-  const parentDir = mkdtempSync(join(tmpdir(), "powerline-worktree-parent-"));
-  const repoDir = join(parentDir, "powerline-footer");
-  const worktreeDir = join(repoDir, "main");
-  const gitDir = join(repoDir, ".bare", "worktrees", "main");
-  mkdirSync(worktreeDir, { recursive: true });
-  mkdirSync(gitDir, { recursive: true });
-  writeFileSync(join(worktreeDir, ".git"), `gitdir: ${gitDir}\n`);
-
-  assert.equal(renderPathName(worktreeDir), "powerline-footer/main");
-
-  writeFileSync(join(worktreeDir, ".git"), "not a gitdir file\n");
-  assert.equal(renderPathName(worktreeDir), "powerline-footer/main");
-});
-
-test("path segment basename includes repository folder for standard linked worktree roots", () => {
-  const parentDir = mkdtempSync(join(tmpdir(), "powerline-worktree-parent-"));
-  const repoDir = join(parentDir, "powerline-footer");
-  const worktreeDir = join(parentDir, "main");
-  const gitDir = join(repoDir, ".git", "worktrees", "main");
-  mkdirSync(worktreeDir, { recursive: true });
-  mkdirSync(gitDir, { recursive: true });
-  writeFileSync(join(worktreeDir, ".git"), `gitdir: ${gitDir}\n`);
-
-  assert.equal(renderPathName(worktreeDir), "powerline-footer/main");
-});
-
-test("path segment only abbreviates cwd inside the home directory", () => {
-  const originalHome = process.env.HOME;
-  process.env.HOME = "/Users/al";
-
-  try {
-    const rendered = renderSegment("path", {
-      cwd: "/Users/alice/project",
-      shellModeActive: false,
-      options: { path: { mode: "full" } },
-      theme: {} as never,
-      colors: {} as never,
-      model: null,
-      thinkingLevel: "off",
-      git: { branch: null, staged: 0, unstaged: 0, untracked: 0 },
-      extensionStatuses: new Map(),
-      customItemsById: new Map(),
-    });
-
-    assert.equal(rendered.visible, true);
-    assert.equal(rendered.content.includes("~/ice/project"), false);
-    assert.equal(rendered.content.includes("/Users/alice/project"), true);
-  } finally {
-    process.env.HOME = originalHome;
-  }
-});
-
-test("path segment uses os home when home environment is unset", () => {
-  const originalHome = process.env.HOME;
-  const originalUserProfile = process.env.USERPROFILE;
-  delete process.env.HOME;
-  delete process.env.USERPROFILE;
-
-  try {
-    const osHome = homedir();
-    const rendered = renderSegment("path", {
-      cwd: osHome,
-      shellModeActive: false,
-      options: { path: { mode: "full" } },
-      theme: {} as never,
-      colors: {} as never,
-      model: null,
-      thinkingLevel: "off",
-      git: { branch: null, staged: 0, unstaged: 0, untracked: 0 },
-      extensionStatuses: new Map(),
-      customItemsById: new Map(),
-    });
-
-    assert.equal(rendered.visible, true);
-    assert.equal(rendered.content.includes("~"), true);
-    assert.equal(rendered.content.includes(osHome), false);
-  } finally {
-    process.env.HOME = originalHome;
-    process.env.USERPROFILE = originalUserProfile;
-  }
 });
 
 test("getNotificationExtensionStatuses skips promoted hidden status keys", () => {
   const statuses = new Map<string, string>([
     ["ci-status", "[ci] queued"],
-    ["review", "\x1b[33m[review] running\x1b[0m"],
+    ["review", "[review] running"],
     ["plain", "plain status"],
   ]);
   const hidden = new Set(["ci-status"]);
 
   assert.deepEqual(getNotificationExtensionStatuses(statuses, hidden), ["[review] running"]);
-});
-
-test("custom item prefixes and values render without external terminal controls", () => {
-  const config = parsePowerlineConfig(
-    { customItems: [{ id: "ci", prefix: "\x1b]52;c;secret\x07CI" }] },
-    ["default"],
-  );
-  const customItemsById = new Map(config.customItems.map((item) => [item.id, item]));
-  const rendered = renderSegment("custom:ci", {
-    cwd: "/repo",
-    shellModeActive: false,
-    options: {},
-    theme: {} as never,
-    colors: {} as never,
-    model: null,
-    thinkingLevel: "off",
-    git: { branch: null, staged: 0, unstaged: 0, untracked: 0 },
-    extensionStatuses: new Map([["ci", "\x1b[31mpass\x1b[0m\x1b]0;title\x07"]]),
-    hiddenExtensionStatusKeys: new Set(),
-    customItemsById,
-  });
-
-  assert.equal(rendered.visible, true);
-  assert.equal(rendered.content, "CI · pass");
 });

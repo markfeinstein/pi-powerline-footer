@@ -1,5 +1,4 @@
-import { loadThemeConfig, type PowerlineThemeConfig } from "./theme.ts";
-import { stripTerminalControlSequences } from "./sanitize.ts";
+import { loadThemeConfig } from "./theme.ts";
 
 export interface IconSet {
   pi: string;
@@ -7,9 +6,11 @@ export interface IconSet {
   folder: string;
   branch: string;
   git: string;
+  github: string;
+  gitlab: string;
+  bitbucket: string;
   tokens: string;
   context: string;
-  thinking: string;
   cost: string;
   time: string;
   agents: string;
@@ -58,9 +59,11 @@ export const NERD_ICONS: IconSet = {
   folder: "\uF115",     // nf-fa-folder_open
   branch: "\uF126",     // nf-fa-code_fork (git branch)
   git: "\uF1D3",        // nf-fa-git (git logo)
+  github: "\uF09B",     // nf-fa-github (octocat)
+  gitlab: "\uF296",     // nf-fa-gitlab (tanuki)
+  bitbucket: "\uF171",  // nf-fa-bitbucket
   tokens: "\uE26B",     // nf-seti-html (tokens symbol)
   context: "\uF1C0",    // nf-fa-database (stable Nerd Fonts v3 database)
-  thinking: "",          // no icon for thinking level
   cost: "\uF155",       // nf-fa-dollar
   time: "\uF017",       // nf-fa-clock_o
   agents: "\uF0C0",     // nf-fa-users
@@ -80,9 +83,11 @@ export const ASCII_ICONS: IconSet = {
   folder: "dir",
   branch: "⎇",
   git: "⎇",
+  github: "⎇",
+  gitlab: "⎇",
+  bitbucket: "⎇",
   tokens: "⊛",
   context: "◫",
-  thinking: "~",
   cost: "$",
   time: "◷",
   agents: "AG",
@@ -105,12 +110,9 @@ function sanitizeUserIconOverrides(value: unknown): PartialIconSet {
   const sanitized: PartialIconSet = {};
   const validKeys = Object.keys(NERD_ICONS) as Array<keyof IconSet>;
   for (const key of validKeys) {
-    const icon = value[key];
+    const icon = Reflect.get(value, key);
     if (typeof icon === "string") {
-      // theme.json is local but still untrusted input: strip terminal control
-      // sequences and line breaks so an icon override cannot inject escape codes
-      // or extra rows into the rendered bar.
-      sanitized[key] = stripTerminalControlSequences(icon).replace(/[\r\n\t]/g, "");
+      sanitized[key] = icon;
     }
   }
 
@@ -160,61 +162,28 @@ export const ASCII_SEPARATORS: SeparatorChars = {
   dot: ".",
 };
 
-// Detect Nerd Font support. Primary control is the powerline config (set via
-// setNerdFontsPreference); the POWERLINE_NERD_FONTS env var is an optional
-// override.
-let configuredNerdFonts: boolean | null = null;
-
-/**
- * Record the Nerd Font preference coming from powerline config (settings.json).
- * This is the primary control. Pass `null`/`undefined` to clear it (fall back to
- * the env var, then the default). The extension keeps this in sync whenever the
- * powerline config is (re)loaded.
- */
-export function setNerdFontsPreference(value: boolean | null | undefined): void {
-  configuredNerdFonts = value ?? null;
-}
-
+// Infer Nerd Font support from environment overrides and terminal-name heuristics.
 export function hasNerdFonts(): boolean {
-  // The POWERLINE_NERD_FONTS env var is an optional override (an escape hatch for
-  // a specific shell/terminal) and wins whenever it is explicitly set.
-  const override = process.env.POWERLINE_NERD_FONTS;
-  if (override === "1") return true;
-  if (override === "0") return false;
-
-  // Primary control: the powerline config in settings.json.
-  if (configuredNerdFonts !== null) return configuredNerdFonts;
-
-  // Default to Nerd Font glyphs. In practice, the powerline footer is used in
-  // terminals that already ship with a patched font, and falling back to the
-  // ASCII icon set makes many segments look broken/blank.
-  return true;
+  // User can set this env var to force Nerd Fonts
+  if (process.env.POWERLINE_NERD_FONTS === "1") return true;
+  if (process.env.POWERLINE_NERD_FONTS === "0") return false;
+  
+  // Check for Ghostty (survives into tmux via GHOSTTY_RESOURCES_DIR)
+  if (process.env.GHOSTTY_RESOURCES_DIR) return true;
+  
+  // Use TERM only when TERM_PROGRAM is unset (e.g. kitty uses TERM=xterm-kitty).
+  // Terminal names are a heuristic, not detection of the configured font.
+  const term = (process.env.TERM_PROGRAM ?? process.env.TERM ?? "").toLowerCase();
+  const nerdTerms = ["iterm", "wezterm", "kitty", "ghostty", "alacritty", "kaku"];
+  return nerdTerms.some(t => term.includes(t));
 }
-
-let cachedIcons: IconSet | null = null;
-let cachedIconsSource: PowerlineThemeConfig | null = null;
-let cachedIconsNerd: boolean | null = null;
 
 export function getIcons(): IconSet {
-  const nerd = hasNerdFonts();
-  const themeConfig = loadThemeConfig();
-  // loadThemeConfig() returns a stable object reference while theme.json is
-  // unchanged, so memoize the assembled icon set (object spread + a 20-key
-  // sanitize pass) and rebuild only when the font preference flips or the theme
-  // file changes. getIcons() is called once per segment on every layout
-  // recompute, where it previously re-allocated and re-sanitized every time.
-  if (cachedIcons && cachedIconsNerd === nerd && cachedIconsSource === themeConfig) {
-    return cachedIcons;
-  }
-
-  const baseIcons = nerd ? NERD_ICONS : ASCII_ICONS;
-  cachedIcons = {
+  const baseIcons = hasNerdFonts() ? NERD_ICONS : ASCII_ICONS;
+  return {
     ...baseIcons,
-    ...sanitizeUserIconOverrides(themeConfig.icons),
+    ...sanitizeUserIconOverrides(loadThemeConfig().icons),
   };
-  cachedIconsSource = themeConfig;
-  cachedIconsNerd = nerd;
-  return cachedIcons;
 }
 
 export function getSeparatorChars(): SeparatorChars {

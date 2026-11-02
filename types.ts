@@ -1,7 +1,8 @@
 import type { Theme, ThemeColor } from "@earendil-works/pi-coding-agent";
+import type { CostCurrencyCode } from "./currency-rates.ts";
 
-// Theme color - either a pi theme color name or a custom hex color
-export type ColorValue = ThemeColor | `#${string}`;
+// Theme color - a pi theme color name, a custom hex color, or the rainbow effect
+export type ColorValue = ThemeColor | `#${string}` | "rainbow";
 export type ThemeLike = Pick<Theme, "fg">;
 
 // Semantic color names for segments
@@ -15,11 +16,18 @@ export type SemanticColor =
   | "thinkingMinimal"
   | "thinkingLow"
   | "thinkingMedium"
+  | "thinkingHigh"
+  | "thinkingXhigh"
+  | "thinkingMax"
   | "context"
   | "contextWarn"
   | "contextError"
+  | "cacheHit"
+  | "cacheHitWarn"
+  | "cacheHitError"
   | "cost"
   | "tokens"
+  | "queue"
   | "separator"
   | "border";
 
@@ -27,26 +35,30 @@ export type SemanticColor =
 export type ColorScheme = Partial<Record<SemanticColor, ColorValue>>;
 
 // Built-in segment identifiers
-export type BuiltinStatusLineSegmentId =
-  | "model"
-  | "shell_mode"
-  | "path"
-  | "git"
-  | "subagents"
-  | "token_in"
-  | "token_out"
-  | "token_total"
-  | "cost"
-  | "context_pct"
-  | "context_total"
-  | "time_spent"
-  | "time"
-  | "session"
-  | "hostname"
-  | "cache_read"
-  | "cache_write"
-  | "thinking"
-  | "extension_statuses";
+export const BUILTIN_STATUS_LINE_SEGMENT_IDS = [
+  "model",
+  "shell_mode",
+  "path",
+  "git",
+  "subagents",
+  "queue",
+  "token_in",
+  "token_out",
+  "token_total",
+  "cost",
+  "context_pct",
+  "context_total",
+  "time_spent",
+  "time",
+  "session",
+  "hostname",
+  "cache_read",
+  "cache_write",
+  "thinking",
+  "extension_statuses",
+] as const;
+
+export type BuiltinStatusLineSegmentId = typeof BUILTIN_STATUS_LINE_SEGMENT_IDS[number];
 
 // Segment identifiers (built-in + dynamically registered custom items)
 export type StatusLineSegmentId = BuiltinStatusLineSegmentId | `custom:${string}`;
@@ -65,14 +77,15 @@ export type StatusLineSeparatorStyle =
   | "star";
 
 // Preset names
+export type PowerlinePlacement = "above" | "below";
+
 export type StatusLinePreset =
   | "default"
   | "minimal"
   | "compact"
   | "full"
   | "nerd"
-  | "ascii"
-  | "custom";
+  | "ascii";
 
 // Per-segment options
 export interface StatusLineSegmentOptions {
@@ -87,26 +100,33 @@ export interface StatusLineSegmentOptions {
     showUnstaged?: boolean;
     showUntracked?: boolean;
     polling?: "full" | "branch" | "off";
+    /** Replace the branch icon with the origin remote's host logo
+     * (GitHub/GitLab/Bitbucket, or a generic git logo). Default false. */
+    hostIcon?: boolean;
+    /** Minimum age of the cached dirty counts before a background refresh
+     * runs, in milliseconds. Default 1000. */
+    statusTtlMs?: number;
   };
   time?: { format?: "12h" | "24h"; showSeconds?: boolean };
-  cost?: { subscriptionDisplay?: "subscription" | "reported-cost" | "both" };
-}
-
-// User-defined layout for the `custom` preset (from settings.json `powerline.custom`)
-export interface CustomLayoutConfig {
-  leftSegments?: BuiltinStatusLineSegmentId[];
-  rightSegments?: BuiltinStatusLineSegmentId[];
-  secondarySegments?: BuiltinStatusLineSegmentId[];
-  separator?: StatusLineSeparatorStyle;
+  cost?: { subscriptionDisplay?: "subscription" | "reported-cost" | "both"; currency?: CostCurrencyCode };
+  context?: { format?: "full" | "percent" };
+  cache_read?: { format?: "tokens" | "percent" | "both" | "request" | "session-request" };
 }
 
 export type CustomItemPosition = "left" | "right" | "secondary";
+
+export interface StatusLineLayout {
+  left?: StatusLineSegmentId[];
+  right?: StatusLineSegmentId[];
+  secondary?: StatusLineSegmentId[];
+}
 
 export interface CustomStatusItem {
   id: string;
   statusKey: string;
   position: CustomItemPosition;
   color?: ColorValue;
+  selfColorize: boolean;
   prefix?: string;
   hideWhenMissing: boolean;
   excludeFromExtensionStatuses: boolean;
@@ -144,12 +164,30 @@ export interface GitStatus {
 }
 
 // Usage statistics
+export interface QueueSummary {
+  queueCount: number;
+  blockedCount: number;
+  compacting: boolean;
+  leadingText: string | null;
+  leadingIntent: "steer" | "follow-up" | "post-compact" | null;
+  leadingStatus: "queued" | "blocked" | "delivering" | "sent" | "failed" | null;
+}
+
 export interface UsageStats {
   input: number;
   output: number;
   cacheRead: number;
   cacheWrite: number;
   cost: number;
+  // Cumulative cost of subagent child runs (e.g. /parallel, /worker) launched from this session.
+  subagentCost: number;
+}
+
+// Prompt-side token counts of one assistant request, used for its cache hit rate.
+export interface RequestCacheUsage {
+  input: number;
+  cacheRead: number;
+  cacheWrite: number;
 }
 
 // Context passed to segment render functions
@@ -166,18 +204,22 @@ export interface SegmentContext {
   } | undefined;
   thinkingLevel: string;
   sessionId: string | undefined;
+  sessionName?: string;
   cwd?: string;
   
   // Computed
   usageStats: UsageStats;
-  contextPercent: number;
+  // Latest request on the active branch since the last compaction or model switch; undefined until one completes.
+  lastRequestCache?: RequestCacheUsage;
+  contextTokens: number | null;
+  contextPercent: number | null;
   contextWindow: number;
+  contextApproximate: boolean;
   autoCompactEnabled: boolean;
   customCompactionEnabled: boolean;
   usingSubscription: boolean;
+  queueSummary: QueueSummary;
   sessionStartTime: number;
-  /** Force the token in/out/cached segments to render even when the value is 0. */
-  alwaysShowTokens: boolean;
   shellModeActive: boolean;
   shellRunning: boolean;
   shellName: string | null;

@@ -1,24 +1,6 @@
 import type { SeparatorDef, StatusLineSeparatorStyle } from "./types.ts";
 import { getSeparatorChars } from "./icons.ts";
 
-// Runtime list of every supported separator style (single source of truth for validation).
-export const SEPARATOR_STYLES: readonly StatusLineSeparatorStyle[] = [
-  "powerline",
-  "powerline-thin",
-  "slash",
-  "pipe",
-  "block",
-  "none",
-  "ascii",
-  "dot",
-  "chevron",
-  "star",
-];
-
-export function isSeparatorStyle(value: unknown): value is StatusLineSeparatorStyle {
-  return typeof value === "string" && (SEPARATOR_STYLES as readonly string[]).includes(value);
-}
-
 export function getSeparator(style: StatusLineSeparatorStyle): SeparatorDef {
   const chars = getSeparatorChars();
 
@@ -46,10 +28,10 @@ export function getSeparator(style: StatusLineSeparatorStyle): SeparatorDef {
       };
 
     case "slash":
-      return { left: ` ${chars.slash} `, right: ` ${chars.slash} ` };
+      return { left: chars.slash, right: chars.slash };
 
     case "pipe":
-      return { left: ` ${chars.pipe} `, right: ` ${chars.pipe} ` };
+      return { left: chars.pipe, right: chars.pipe };
 
     case "block":
       return { left: chars.block, right: chars.block };

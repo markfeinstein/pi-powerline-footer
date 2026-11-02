@@ -1,40 +1,15 @@
 {
   "name": "pi-powerline-footer",
-  "version": "0.6.1",
+  "version": "0.22.0",
   "description": "Powerline-style status bar extension for pi coding agent",
   "type": "module",
   "files": [
-    "README.md",
-    "CHANGELOG.md",
-    "CONTRIBUTING.md",
-    "theme.example.json",
-    "banner.png",
-    "colors.ts",
-    "context-usage.ts",
-    "editor-composition.ts",
-    "git-status.ts",
-    "icons.ts",
-    "index.ts",
-    "layout.ts",
-    "lifecycle.ts",
-    "paths.ts",
-    "pills.ts",
-    "powerline-config.ts",
-    "presets.ts",
-    "project-key.ts",
-    "render-scheduler.ts",
-    "sanitize.ts",
-    "segments.ts",
-    "separators.ts",
-    "shortcuts.ts",
-    "terminal-cursor.ts",
-    "theme.ts",
-    "types.ts",
-    "welcome-dismiss.ts",
-    "welcome.ts",
-    "working-vibes.ts",
+    "*.ts",
+    "*.md",
+    "*.json",
+    "!progress.md",
     "bash-mode/**/*.ts",
-    "fixed-editor/**/*.ts"
+    "queue/**/*.ts"
   ],
   "keywords": [
     "pi-package",
@@ -46,26 +21,25 @@
   ],
   "author": "Nico Bailon",
   "license": "MIT",
-  "engines": {
-    "node": ">=22.19.0"
-  },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/nicobailon/pi-powerline-footer.git"
   },
   "scripts": {
-    "test": "node --experimental-strip-types --test tests/**/*.test.ts",
-    "pack:check": "npm pack --dry-run --json | node scripts/validate-pack.mjs"
+    "typecheck": "tsc --noEmit",
+    "test": "node --experimental-strip-types --test tests/**/*.test.ts"
   },
   "peerDependencies": {
-    "@earendil-works/pi-ai": ">=0.74.0 <0.81.0",
-    "@earendil-works/pi-coding-agent": ">=0.74.0 <0.81.0",
-    "@earendil-works/pi-tui": ">=0.74.0 <0.81.0"
+    "@earendil-works/pi-ai": ">=0.81.0",
+    "@earendil-works/pi-coding-agent": ">=0.81.0",
+    "@earendil-works/pi-tui": ">=0.81.0"
   },
   "devDependencies": {
-    "@earendil-works/pi-ai": "^0.80.3",
-    "@earendil-works/pi-coding-agent": "^0.80.3",
-    "@earendil-works/pi-tui": "^0.80.3"
+    "@earendil-works/pi-ai": "^0.85.0",
+    "@earendil-works/pi-coding-agent": "^0.85.0",
+    "@earendil-works/pi-tui": "^0.85.0",
+    "@types/node": "24.13.3",
+    "typescript": "5.9.3"
   },
   "pi": {
     "extensions": [

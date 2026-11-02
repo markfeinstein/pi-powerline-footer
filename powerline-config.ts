@@ -1,77 +1,35 @@
 import { visibleWidth } from "@earendil-works/pi-tui";
-import type { BuiltinStatusLineSegmentId, ColorValue, CustomItemPosition, CustomLayoutConfig, CustomStatusItem, PresetDef, StatusLinePreset, StatusLineSegmentId, StatusLineSegmentOptions } from "./types.ts";
-import { isSeparatorStyle } from "./separators.ts";
-import { DEFAULT_PILL_BACKGROUND } from "./pills.ts";
-import { stripTerminalControlSequences } from "./sanitize.ts";
+import { normalizeCostCurrency } from "./currency-rates.ts";
+import { BUILTIN_STATUS_LINE_SEGMENT_IDS } from "./types.ts";
+import type { ColorValue, CustomItemPosition, CustomStatusItem, PowerlinePlacement, PresetDef, StatusLineLayout, StatusLinePreset, StatusLineSegmentId, StatusLineSegmentOptions, StatusLineSeparatorStyle } from "./types.ts";
 
-// Re-exported for backwards compatibility with existing importers.
-export { stripTerminalControlSequences };
-
-// Runtime set of every built-in segment id. The `satisfies` check makes the
-// compiler fail if a BuiltinStatusLineSegmentId is added/removed without
-// updating this map, keeping it in sync with the type union (avoids importing
-// SEGMENTS from segments.ts, which would create an import cycle).
-const BUILTIN_SEGMENT_ID_SET = {
-  model: true,
-  shell_mode: true,
-  path: true,
-  git: true,
-  subagents: true,
-  token_in: true,
-  token_out: true,
-  token_total: true,
-  cost: true,
-  context_pct: true,
-  context_total: true,
-  time_spent: true,
-  time: true,
-  session: true,
-  hostname: true,
-  cache_read: true,
-  cache_write: true,
-  thinking: true,
-  extension_statuses: true,
-} satisfies Record<BuiltinStatusLineSegmentId, true>;
+export type CompactPromptMode = "queue" | "native";
+export type SecondaryOverflow = "drop" | "wrap";
+export type WorkingIndicatorPlacement = "editor-border" | "above-powerline";
 
 export interface PowerlineConfig {
   preset: StatusLinePreset;
   customItems: CustomStatusItem[];
+  disabledSegments: StatusLineSegmentId[];
+  invalidDisabledSegments: string[];
+  layout: StatusLineLayout | null;
+  invalidLayoutSegments: string[];
+  separator: StatusLineSeparatorStyle | null;
   segmentOptions: StatusLineSegmentOptions;
-  custom: CustomLayoutConfig | null;
-  mouseScroll: boolean;
-  fixedEditor: boolean;
-  /** Render the status bar below the editor instead of above it (fixed-editor mode). */
-  statusBelowPrompt: boolean;
-  /** Render the last-prompt rows above the editor instead of below (fixed-editor mode). */
-  lastPromptAboveInput: boolean;
-  /** Merge the "Working…" indicator into the status bar line instead of a separate row. */
-  inlineWorkingStatus: boolean;
-  /** Reduce the "Working…" indicator to just its spinner glyph (drop the message text). */
-  hideWorkingMessage: boolean;
-  /** Render each status segment as a filled pill with rounded half-circle caps. */
-  pills: boolean;
-  /** Hex background color used for pills when `pills` is enabled. */
-  pillBackground: string;
-  /** Per-segment-id hex background overrides for pills. */
-  pillColors: Record<string, string>;
-  /** Default text/icon color for pills (empty = keep each segment's own colors). */
-  pillForeground: string;
-  /** Per-segment-id hex text/icon color overrides for pills. */
-  pillTextColors: Record<string, string>;
-  /** Groups of segment ids to merge into a single multi-color pill. */
-  pillGroups: string[][];
-  /** Force the token in/out/cached segments to render even when the value is 0. */
-  alwaysShowTokens: boolean;
-  /** Render the status bar text in bold. */
-  bold: boolean;
-  /**
-   * Use Nerd Font glyph icons and separators. This is the primary control.
-   * `null` means "not configured": fall back to the POWERLINE_NERD_FONTS env
-   * var, then default to `true`. The env var, when explicitly set, overrides this.
-   */
-  nerdFonts: boolean | null;
+  placement: PowerlinePlacement;
+  invalidPlacement: string | null;
+  padding: number;
+  secondaryOverflow: SecondaryOverflow;
+  invalidSecondaryOverflow: string | null;
+  workingIndicatorPlacement: WorkingIndicatorPlacement;
+  invalidWorkingIndicatorPlacement: string | null;
   welcome: boolean;
   stashSharpSShortcut: boolean;
+  queue: { compactPromptMode: CompactPromptMode };
+  sendDelayMs: number;
+  autoFollowUp: boolean;
+  workingVibes: { color?: ColorValue | "rainbow" };
+  hiddenExtensionStatusKeys: string[];
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -82,6 +40,69 @@ function normalizePreset(value: unknown, presets: readonly StatusLinePreset[]): 
   if (typeof value !== "string") return null;
   const normalized = value.trim().toLowerCase();
   return (presets as readonly string[]).includes(normalized) ? (normalized as StatusLinePreset) : null;
+}
+
+function normalizePlacement(value: unknown): { placement: PowerlinePlacement; invalidPlacement: string | null } {
+  if (value === undefined) return { placement: "above", invalidPlacement: null };
+
+  const normalized = typeof value === "string" ? value.trim().toLowerCase() : "";
+  if (normalized === "above" || normalized === "below") {
+    return { placement: normalized, invalidPlacement: null };
+  }
+
+  return {
+    placement: "above",
+    invalidPlacement: typeof value === "string" ? value.trim() : String(value),
+  };
+}
+
+function normalizeSecondaryOverflow(value: unknown): { secondaryOverflow: SecondaryOverflow; invalidSecondaryOverflow: string | null } {
+  if (value === undefined) return { secondaryOverflow: "drop", invalidSecondaryOverflow: null };
+
+  const normalized = typeof value === "string" ? value.trim().toLowerCase() : "";
+  if (normalized === "drop" || normalized === "wrap") {
+    return { secondaryOverflow: normalized, invalidSecondaryOverflow: null };
+  }
+
+  return {
+    secondaryOverflow: "drop",
+    invalidSecondaryOverflow: typeof value === "string" ? value.trim() : String(value),
+  };
+}
+
+function normalizeWorkingIndicatorPlacement(value: unknown): { workingIndicatorPlacement: WorkingIndicatorPlacement; invalidWorkingIndicatorPlacement: string | null } {
+  if (value === undefined) return { workingIndicatorPlacement: "editor-border", invalidWorkingIndicatorPlacement: null };
+
+  const normalized = typeof value === "string" ? value.trim().toLowerCase() : "";
+  if (normalized === "editor-border" || normalized === "above-powerline") {
+    return { workingIndicatorPlacement: normalized, invalidWorkingIndicatorPlacement: null };
+  }
+
+  return {
+    workingIndicatorPlacement: "editor-border",
+    invalidWorkingIndicatorPlacement: typeof value === "string" ? value.trim() : String(value),
+  };
+}
+
+const SEPARATOR_STYLES = [
+  "powerline",
+  "powerline-thin",
+  "slash",
+  "pipe",
+  "block",
+  "none",
+  "ascii",
+  "dot",
+  "chevron",
+  "star",
+] as const satisfies readonly StatusLineSeparatorStyle[];
+
+function normalizeSeparator(value: unknown): StatusLineSeparatorStyle | null {
+  if (typeof value !== "string") return null;
+  const normalized = value.trim().toLowerCase();
+  return (SEPARATOR_STYLES as readonly string[]).includes(normalized)
+    ? (normalized as StatusLineSeparatorStyle)
+    : null;
 }
 
 function normalizeCustomItemId(value: unknown): string | null {
@@ -96,20 +117,18 @@ function normalizeCustomItemPosition(value: unknown): CustomItemPosition {
   return "right";
 }
 
-function normalizeSingleLineStatusText(value: string): string {
-  return stripTerminalControlSequences(value).replace(/[\r\n\t]+/g, " ");
-}
-
 function normalizeCustomColor(value: unknown): ColorValue | undefined {
-  const normalized = normalizeColorValue(value);
+  if (typeof value !== "string") return undefined;
+  const normalized = value.trim();
   return normalized ? (normalized as ColorValue) : undefined;
 }
 
 function normalizeCustomPrefix(value: unknown): string | undefined {
   if (typeof value !== "string") return undefined;
-  const normalized = normalizeSingleLineStatusText(value).trim();
+  const normalized = value.trim();
   return normalized ? normalized : undefined;
 }
+
 
 function normalizeCustomStatusItem(raw: unknown, idOverride?: string): CustomStatusItem | null {
   if (!isRecord(raw)) return null;
@@ -123,6 +142,7 @@ function normalizeCustomStatusItem(raw: unknown, idOverride?: string): CustomSta
     statusKey,
     position: normalizeCustomItemPosition(raw.position),
     color: normalizeCustomColor(raw.color),
+    selfColorize: raw.selfColorize === true,
     prefix: normalizeCustomPrefix(raw.prefix),
     hideWhenMissing: raw.hideWhenMissing !== false,
     excludeFromExtensionStatuses: raw.excludeFromExtensionStatuses !== false,
@@ -152,72 +172,90 @@ function normalizeCustomItems(raw: unknown): CustomStatusItem[] {
   return [...deduped.values()];
 }
 
-function isBuiltinSegmentId(value: unknown): value is BuiltinStatusLineSegmentId {
-  return typeof value === "string" && Object.prototype.hasOwnProperty.call(BUILTIN_SEGMENT_ID_SET, value);
+const BUILTIN_STATUS_LINE_SEGMENT_ID_SET = new Set<string>(BUILTIN_STATUS_LINE_SEGMENT_IDS);
+
+function normalizeStatusLineSegmentId(value: unknown, customItemIds: ReadonlySet<string>): StatusLineSegmentId | null {
+  if (typeof value !== "string") return null;
+
+  const normalized = value.trim();
+  if (BUILTIN_STATUS_LINE_SEGMENT_ID_SET.has(normalized)) {
+    return normalized as StatusLineSegmentId;
+  }
+
+  const customId = normalized.startsWith("custom:")
+    ? normalizeCustomItemId(normalized.slice("custom:".length))
+    : null;
+  return customId && customItemIds.has(customId) ? `custom:${customId}` : null;
 }
 
-function normalizeSegmentIdList(raw: unknown): BuiltinStatusLineSegmentId[] | undefined {
-  if (!Array.isArray(raw)) return undefined;
-  const seen = new Set<BuiltinStatusLineSegmentId>();
+function normalizeDisabledSegments(
+  raw: unknown,
+  customItems: readonly CustomStatusItem[],
+): { disabledSegments: StatusLineSegmentId[]; invalidDisabledSegments: string[] } {
+  if (!Array.isArray(raw)) return { disabledSegments: [], invalidDisabledSegments: [] };
+
+  const disabledSegments: StatusLineSegmentId[] = [];
+  const invalidDisabledSegments: string[] = [];
+  const customItemIds = new Set(customItems.map((item) => item.id));
+  const seen = new Set<StatusLineSegmentId>();
+
   for (const entry of raw) {
-    if (isBuiltinSegmentId(entry)) seen.add(entry);
+    const segmentId = normalizeStatusLineSegmentId(entry, customItemIds);
+    if (!segmentId) {
+      invalidDisabledSegments.push(typeof entry === "string" ? entry.trim() : String(entry));
+    } else if (!seen.has(segmentId)) {
+      seen.add(segmentId);
+      disabledSegments.push(segmentId);
+    }
   }
-  return [...seen];
+
+  return { disabledSegments, invalidDisabledSegments };
 }
 
-// Parse `powerline.custom` into a validated layout. Unknown segment ids and
-// invalid separators are dropped. Returns null when nothing usable is present.
-function normalizeCustomLayout(raw: unknown): CustomLayoutConfig | null {
-  if (!isRecord(raw)) return null;
+function normalizeLayout(
+  raw: unknown,
+  customItems: readonly CustomStatusItem[],
+): { layout: StatusLineLayout | null; invalidLayoutSegments: string[] } {
+  if (!isRecord(raw)) return { layout: null, invalidLayoutSegments: [] };
 
-  const layout: CustomLayoutConfig = {};
-  const left = normalizeSegmentIdList(raw.leftSegments);
-  const right = normalizeSegmentIdList(raw.rightSegments);
-  const secondary = normalizeSegmentIdList(raw.secondarySegments);
+  const layout: StatusLineLayout = {};
+  const invalidLayoutSegments: string[] = [];
+  const customItemIds = new Set(customItems.map((item) => item.id));
+  const globallyPlaced = new Set<StatusLineSegmentId>();
 
-  if (left) layout.leftSegments = left;
-  if (right) layout.rightSegments = right;
-  if (secondary) layout.secondarySegments = secondary;
-  if (isSeparatorStyle(raw.separator)) layout.separator = raw.separator;
+  for (const row of ["left", "right", "secondary"] as const) {
+    const entries = raw[row];
+    if (!Array.isArray(entries)) continue;
 
-  return Object.keys(layout).length > 0 ? layout : null;
-}
-
-const HEX_COLOR = /^#[0-9a-fA-F]{6}$/;
-const THEME_COLOR_NAME = /^[a-zA-Z][a-zA-Z0-9_-]*$/;
-
-function normalizeColorValue(value: unknown): string {
-  if (typeof value !== "string") return "";
-  const normalized = value.trim();
-  return HEX_COLOR.test(normalized) || THEME_COLOR_NAME.test(normalized) ? normalized : "";
-}
-
-function normalizeHexColor(value: unknown): string {
-  if (typeof value !== "string") return "";
-  const normalized = value.trim();
-  return HEX_COLOR.test(normalized) ? normalized : "";
-}
-
-// Parse `powerline.pillColors`: an object mapping segment id -> hex color.
-function normalizePillColors(raw: unknown): Record<string, string> {
-  if (!isRecord(raw)) return {};
-  const out: Record<string, string> = {};
-  for (const [id, color] of Object.entries(raw)) {
-    if (typeof color === "string" && HEX_COLOR.test(color)) out[id] = color;
+    const segments: StatusLineSegmentId[] = [];
+    const seen = new Set<StatusLineSegmentId>();
+    for (const entry of entries) {
+      const segmentId = normalizeStatusLineSegmentId(entry, customItemIds);
+      if (!segmentId) {
+        invalidLayoutSegments.push(`${row}:${typeof entry === "string" ? entry.trim() : String(entry)}`);
+      } else if (!seen.has(segmentId)) {
+        seen.add(segmentId);
+        if (globallyPlaced.has(segmentId)) {
+          invalidLayoutSegments.push(`${row}:${segmentId}`);
+        } else {
+          globallyPlaced.add(segmentId);
+          segments.push(segmentId);
+        }
+      }
+    }
+    layout[row] = segments;
   }
-  return out;
+
+  return Object.keys(layout).length > 0
+    ? { layout, invalidLayoutSegments }
+    : { layout: null, invalidLayoutSegments };
 }
 
-// Parse `powerline.pillGroups`: an array of arrays of segment ids.
-function normalizePillGroups(raw: unknown): string[][] {
-  if (!Array.isArray(raw)) return [];
-  const groups: string[][] = [];
-  for (const group of raw) {
-    if (!Array.isArray(group)) continue;
-    const ids = group.filter((id): id is string => typeof id === "string");
-    if (ids.length > 0) groups.push(ids);
-  }
-  return groups;
+function normalizeQueueOptions(raw: unknown): PowerlineConfig["queue"] {
+  if (!isRecord(raw)) return { compactPromptMode: "queue" };
+  return {
+    compactPromptMode: raw.compactPromptMode === "native" ? "native" : "queue",
+  };
 }
 
 function normalizeSegmentOptions(raw: Record<string, unknown>): StatusLineSegmentOptions {
@@ -246,6 +284,10 @@ function normalizeSegmentOptions(raw: Record<string, unknown>): StatusLineSegmen
       ...(typeof raw.git.showUnstaged === "boolean" ? { showUnstaged: raw.git.showUnstaged } : {}),
       ...(typeof raw.git.showUntracked === "boolean" ? { showUntracked: raw.git.showUntracked } : {}),
       ...(raw.git.polling === "full" || raw.git.polling === "branch" || raw.git.polling === "off" ? { polling: raw.git.polling } : {}),
+      ...(typeof raw.git.statusTtlMs === "number" && Number.isFinite(raw.git.statusTtlMs) && raw.git.statusTtlMs >= 0
+        ? { statusTtlMs: raw.git.statusTtlMs }
+        : {}),
+      ...(typeof raw.git.hostIcon === "boolean" ? { hostIcon: raw.git.hostIcon } : {}),
     };
   }
 
@@ -257,11 +299,29 @@ function normalizeSegmentOptions(raw: Record<string, unknown>): StatusLineSegmen
   }
 
   if (isRecord(raw.cost)) {
+    const currency = normalizeCostCurrency(raw.cost.currency);
     options.cost = {
       ...(raw.cost.subscriptionDisplay === "subscription"
         || raw.cost.subscriptionDisplay === "reported-cost"
         || raw.cost.subscriptionDisplay === "both"
         ? { subscriptionDisplay: raw.cost.subscriptionDisplay }
+        : {}),
+      ...(currency ? { currency } : {}),
+    };
+  }
+
+  if (isRecord(raw.context)) {
+    options.context = {
+      ...(raw.context.format === "full" || raw.context.format === "percent" ? { format: raw.context.format } : {}),
+    };
+  }
+
+  if (isRecord(raw.cache_read)) {
+    options.cache_read = {
+      ...(raw.cache_read.format === "tokens" || raw.cache_read.format === "percent" || raw.cache_read.format === "both"
+        || raw.cache_read.format === "request"
+        || raw.cache_read.format === "session-request"
+        ? { format: raw.cache_read.format }
         : {}),
     };
   }
@@ -281,6 +341,8 @@ export function mergeSegmentOptions(
     git: { ...defaults.git, ...overrides.git },
     time: { ...defaults.time, ...overrides.time },
     cost: { ...defaults.cost, ...overrides.cost },
+    context: { ...defaults.context, ...overrides.context },
+    cache_read: { ...defaults.cache_read, ...overrides.cache_read },
   };
 }
 
@@ -288,25 +350,26 @@ export function parsePowerlineConfig(value: unknown, presets: readonly StatusLin
   const defaultConfig: PowerlineConfig = {
     preset: "default",
     customItems: [],
+    disabledSegments: [],
+    invalidDisabledSegments: [],
+    layout: null,
+    invalidLayoutSegments: [],
+    separator: null,
     segmentOptions: {},
-    custom: null,
-    mouseScroll: true,
-    fixedEditor: true,
-    statusBelowPrompt: false,
-    lastPromptAboveInput: false,
-    inlineWorkingStatus: false,
-    hideWorkingMessage: false,
-    pills: false,
-    pillBackground: DEFAULT_PILL_BACKGROUND,
-    pillColors: {},
-    pillForeground: "",
-    pillTextColors: {},
-    pillGroups: [],
-    alwaysShowTokens: false,
-    bold: false,
-    nerdFonts: null,
+    placement: "above",
+    invalidPlacement: null,
+    padding: 1,
+    secondaryOverflow: "drop",
+    invalidSecondaryOverflow: null,
+    workingIndicatorPlacement: "editor-border",
+    invalidWorkingIndicatorPlacement: null,
     welcome: true,
     stashSharpSShortcut: false,
+    queue: { compactPromptMode: "queue" },
+    sendDelayMs: 0,
+    autoFollowUp: false,
+    workingVibes: {},
+    hiddenExtensionStatusKeys: [],
   };
 
   const directPreset = normalizePreset(value, presets);
@@ -314,65 +377,91 @@ export function parsePowerlineConfig(value: unknown, presets: readonly StatusLin
 
   if (!isRecord(value)) return defaultConfig;
 
+  const customItems = normalizeCustomItems(value.customItems);
+  const { disabledSegments, invalidDisabledSegments } = normalizeDisabledSegments(value.disabledSegments, customItems);
+  const { layout, invalidLayoutSegments } = normalizeLayout(value.layout, customItems);
+  const { placement, invalidPlacement } = normalizePlacement(value.placement);
+  const { secondaryOverflow, invalidSecondaryOverflow } = normalizeSecondaryOverflow(value.secondaryOverflow);
+  const { workingIndicatorPlacement, invalidWorkingIndicatorPlacement } = normalizeWorkingIndicatorPlacement(value.workingIndicatorPlacement);
+
   return {
     preset: normalizePreset(value.preset, presets) ?? defaultConfig.preset,
-    customItems: normalizeCustomItems(value.customItems),
+    customItems,
+    disabledSegments,
+    invalidDisabledSegments,
+    layout,
+    invalidLayoutSegments,
+    separator: normalizeSeparator(value.separator),
     segmentOptions: normalizeSegmentOptions(value),
-    custom: normalizeCustomLayout(value.custom),
-    mouseScroll: value.mouseScroll !== false,
-    fixedEditor: value.fixedEditor !== false,
-    statusBelowPrompt: value.statusBelowPrompt === true,
-    lastPromptAboveInput: value.lastPromptAboveInput === true,
-    inlineWorkingStatus: value.inlineWorkingStatus === true,
-    hideWorkingMessage: value.hideWorkingMessage === true,
-    pills: value.pills === true,
-    pillBackground: typeof value.pillBackground === "string" && /^#[0-9a-fA-F]{6}$/.test(value.pillBackground)
-      ? value.pillBackground
-      : DEFAULT_PILL_BACKGROUND,
-    pillColors: normalizePillColors(value.pillColors),
-    pillForeground: normalizeHexColor(value.pillForeground),
-    pillTextColors: normalizePillColors(value.pillTextColors),
-    pillGroups: normalizePillGroups(value.pillGroups),
-    alwaysShowTokens: value.alwaysShowTokens === true,
-    bold: value.bold === true,
-    nerdFonts: typeof value.nerdFonts === "boolean" ? value.nerdFonts : null,
+    placement,
+    invalidPlacement,
+    padding: typeof value.padding === "number" && Number.isInteger(value.padding) && value.padding >= 0 && value.padding <= 8
+      ? value.padding
+      : defaultConfig.padding,
+    secondaryOverflow,
+    invalidSecondaryOverflow,
+    workingIndicatorPlacement,
+    invalidWorkingIndicatorPlacement,
     welcome: value.welcome !== false,
     stashSharpSShortcut: value.stashSharpSShortcut === true,
+    queue: normalizeQueueOptions(value.queue),
+    sendDelayMs: typeof value.sendDelayMs === "number" && Number.isFinite(value.sendDelayMs) && value.sendDelayMs > 0
+      ? value.sendDelayMs
+      : 0,
+    autoFollowUp: value.autoFollowUp === true,
+    workingVibes: isRecord(value.workingVibes) && typeof value.workingVibes.color === "string" && value.workingVibes.color.trim()
+      ? { color: value.workingVibes.color.trim() as ColorValue | "rainbow" }
+      : {},
+    hiddenExtensionStatusKeys: normalizeHiddenExtensionStatusKeys(value.hiddenExtensionStatusKeys),
   };
 }
 
-// When the active preset is `custom` and a `powerline.custom` layout is
-// configured, override the preset's segments/separator with the user's values.
-// Any field omitted from the config falls back to the built-in `custom` preset.
-export function applyCustomLayout(presetDef: PresetDef, config: Pick<PowerlineConfig, "preset" | "custom">): PresetDef {
-  if (config.preset !== "custom" || !config.custom) return presetDef;
-  const custom = config.custom;
-  return {
-    ...presetDef,
-    leftSegments: custom.leftSegments ?? presetDef.leftSegments,
-    rightSegments: custom.rightSegments ?? presetDef.rightSegments,
-    secondarySegments: custom.secondarySegments ?? presetDef.secondarySegments,
-    separator: custom.separator ?? presetDef.separator,
-  };
-}
-
-export function mergeSegmentsWithCustomItems(presetDef: PresetDef, customItems: readonly CustomStatusItem[]): {
+export function mergeSegmentsWithCustomItems(
+  presetDef: PresetDef,
+  customItems: readonly CustomStatusItem[],
+  options: {
+    layout?: StatusLineLayout | null;
+    disabledSegments?: readonly StatusLineSegmentId[];
+  } = {},
+): {
   leftSegments: StatusLineSegmentId[];
   rightSegments: StatusLineSegmentId[];
   secondarySegments: StatusLineSegmentId[];
 } {
-  const left: StatusLineSegmentId[] = [...presetDef.leftSegments];
-  const right: StatusLineSegmentId[] = [...presetDef.rightSegments];
-  const secondary: StatusLineSegmentId[] = [...(presetDef.secondarySegments ?? [])];
+  const layout = options.layout ?? null;
+  const explicitlyPlaced = new Set([
+    ...(layout?.left ?? []),
+    ...(layout?.right ?? []),
+    ...(layout?.secondary ?? []),
+  ]);
+  const disabled = new Set(options.disabledSegments ?? []);
 
-  for (const item of customItems) {
-    const segmentId: StatusLineSegmentId = `custom:${item.id}`;
-    if (item.position === "left") left.push(segmentId);
-    else if (item.position === "secondary") secondary.push(segmentId);
-    else right.push(segmentId);
-  }
+  const buildRow = (
+    position: CustomItemPosition,
+    configured: StatusLineSegmentId[] | undefined,
+    presetSegments: readonly StatusLineSegmentId[],
+  ): StatusLineSegmentId[] => {
+    const segments = configured !== undefined
+      ? [...configured]
+      : presetSegments.filter((id) => !explicitlyPlaced.has(id));
 
-  return { leftSegments: left, rightSegments: right, secondarySegments: secondary };
+    if (configured === undefined) {
+      for (const item of customItems) {
+        const segmentId: StatusLineSegmentId = `custom:${item.id}`;
+        if (item.position === position && !explicitlyPlaced.has(segmentId)) {
+          segments.push(segmentId);
+        }
+      }
+    }
+
+    return segments.filter((id) => !disabled.has(id));
+  };
+
+  return {
+    leftSegments: buildRow("left", layout?.left, presetDef.leftSegments),
+    rightSegments: buildRow("right", layout?.right, presetDef.rightSegments),
+    secondarySegments: buildRow("secondary", layout?.secondary, presetDef.secondarySegments ?? []),
+  };
 }
 
 export function nextPowerlineSettingWithPreset(existingPowerlineSetting: unknown, preset: StatusLinePreset): unknown {
@@ -384,7 +473,7 @@ export function nextPowerlineSettingWithPreset(existingPowerlineSetting: unknown
 
 export function nextPowerlineSettingWithOptions(
   existingPowerlineSetting: unknown,
-  updates: Partial<Pick<PowerlineConfig, "mouseScroll" | "fixedEditor" | "welcome" | "stashSharpSShortcut">>,
+  updates: Partial<Pick<PowerlineConfig, "welcome" | "stashSharpSShortcut" | "placement">>,
   currentPreset: StatusLinePreset,
 ): unknown {
   if (!isRecord(existingPowerlineSetting)) {
@@ -393,8 +482,22 @@ export function nextPowerlineSettingWithOptions(
   return { ...existingPowerlineSetting, ...updates };
 }
 
-export function collectHiddenExtensionStatusKeys(customItems: readonly CustomStatusItem[]): Set<string> {
-  const hidden = new Set<string>();
+function normalizeHiddenExtensionStatusKeys(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  const keys: string[] = [];
+  for (const entry of value) {
+    if (typeof entry !== "string") continue;
+    const key = entry.trim();
+    if (key && !keys.includes(key)) keys.push(key);
+  }
+  return keys;
+}
+
+export function collectHiddenExtensionStatusKeys(
+  customItems: readonly CustomStatusItem[],
+  extraHiddenKeys: readonly string[] = [],
+): Set<string> {
+  const hidden = new Set<string>(extraHiddenKeys);
   for (const item of customItems) {
     if (item.excludeFromExtensionStatuses) hidden.add(item.statusKey);
   }
@@ -402,7 +505,7 @@ export function collectHiddenExtensionStatusKeys(customItems: readonly CustomSta
 }
 
 export function isNotificationExtensionStatus(value: string): boolean {
-  return stripTerminalControlSequences(value).trimStart().startsWith("[");
+  return value.trimStart().startsWith("[");
 }
 
 export function getNotificationExtensionStatuses(
@@ -414,18 +517,19 @@ export function getNotificationExtensionStatuses(
     if (hiddenKeys.has(statusKey) || !value || !isNotificationExtensionStatus(value)) {
       continue;
     }
-    const normalized = normalizeExtensionStatusValue(value);
-    if (normalized) notifications.push(normalized);
+    notifications.push(value);
   }
   return notifications;
 }
 
-export function normalizeExtensionStatusValue(value: string): string | null {
+export function normalizeExtensionStatusValue(value: string, preserveAnsi = false): string | null {
   if (!value || visibleWidth(value) <= 0) {
     return null;
   }
 
-  const stripped = normalizeSingleLineStatusText(value).replace(/(\s|·|[|])+$/, "");
+  const stripped = preserveAnsi
+    ? value.replace(/(\s|·|[|])+$/, "")
+    : value.replace(/(\x1b\[[0-9;]*m|\s|·|[|])+$/, "");
   return visibleWidth(stripped) > 0 ? stripped : null;
 }
 

@@ -1,370 +1,296 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { delimiter, join } from "node:path";
-import { spawnSync } from "node:child_process";
-import { getGitStatus, invalidateGitBranch, invalidateGitStatus, setGitStatusUpdateListener } from "../git-status.ts";
-import { getPreset } from "../presets.ts";
+import { join } from "node:path";
+import { detectGitHost, getCurrentBranch, getGitRemoteHost, getGitStatus, invalidateGitBranch, invalidateGitStatus, subscribeGitUpdates, waitForGitUpdates } from "../git-status.ts";
 
-test("git status supports disabling extension git polling", () => {
-  assert.deepEqual(getGitStatus("main", "off"), {
-    branch: "main",
-    staged: 0,
-    unstaged: 0,
-    untracked: 0,
+function fixture(t: test.TestContext) {
+  const root = mkdtempSync(join(tmpdir(), "powerline-git-status-"));
+  t.after(async () => {
+    await waitForGitUpdates();
+    // A git lookup that hit runGit's timeout resolves before the killed git.exe
+    // exits; on Windows its handle on the directory fails rmSync with EPERM.
+    rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   });
-});
+  const git = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
+  const repo = (name: string, host: string) => {
+    const cwd = join(root, name);
+    mkdirSync(cwd);
+    git(cwd, "init", "-q", "-b", name);
+    git(cwd, "remote", "add", "origin", `https://${host}/owner/repo`);
+    return cwd;
+  };
+  return { root, git, repo };
+}
 
-test("minimal preset uses branch-only git polling by default", () => {
-  assert.equal(getPreset("minimal").segmentOptions?.git?.polling, "branch");
-});
-
-test("git status cache is isolated per cwd", async () => {
-  const root = mkdtempSync(join(tmpdir(), "powerline-git-cache-"));
-  const repoA = join(root, "repo-a");
-  const repoB = join(root, "repo-b");
-  mkdirSync(repoA);
-  mkdirSync(repoB);
-  initRepo(repoA, "alpha");
-  initRepo(repoB, "beta");
-  writeFileSync(join(repoA, "a.txt"), "a\n");
-
-  invalidateGitStatus();
-  invalidateGitBranch();
-
-  const statusA = await waitForGitStatus(repoA, (status) => status.branch === "alpha" && status.untracked === 1);
-  assert.equal(statusA.branch, "alpha");
-  assert.equal(statusA.untracked, 1);
-
-  const firstStatusB = getGitStatus(null, "full", repoB);
-  assert.notEqual(firstStatusB.branch, "alpha");
-  assert.equal(firstStatusB.untracked, 0);
-
-  const statusB = await waitForGitStatus(repoB, (status) => status.branch === "beta" && status.untracked === 0);
-  assert.equal(statusB.branch, "beta");
-  assert.equal(statusB.untracked, 0);
-});
-
-test("git status cache is shared across symlinked repo paths", async () => {
-  const root = mkdtempSync(join(tmpdir(), "powerline-git-symlink-"));
-  const repo = join(root, "repo");
-  const link = join(root, "repo-link");
-  mkdirSync(repo);
-  initRepo(repo, "main");
-  symlinkSync(repo, link, "dir");
-  writeFileSync(join(repo, "a.txt"), "a\n");
-
-  invalidateGitStatus();
-  invalidateGitBranch();
-
-  const realStatus = await waitForGitStatus(repo, (status) => status.branch === "main" && status.untracked === 1);
-  assert.equal(realStatus.untracked, 1);
-
-  const linkedStatus = getGitStatus(null, "full", link);
-  assert.equal(linkedStatus.branch, "main");
-  assert.equal(linkedStatus.untracked, 1);
-});
-
-test("git status counts staged, unstaged, and untracked changes together", async () => {
-  const repo = mkdtempSync(join(tmpdir(), "powerline-git-mixed-"));
-  initRepo(repo, "main");
-  writeFileSync(join(repo, "tracked.txt"), "v1\n");
-  git(repo, "add", "tracked.txt");
-  git(repo, "commit", "-m", "init");
-
-  // tracked.txt modified but not staged -> unstaged
-  writeFileSync(join(repo, "tracked.txt"), "v2\n");
-  // staged.txt newly added -> staged
-  writeFileSync(join(repo, "staged.txt"), "s\n");
-  git(repo, "add", "staged.txt");
-  // untracked.txt never added -> untracked
-  writeFileSync(join(repo, "untracked.txt"), "u\n");
-
-  invalidateGitStatus();
-  invalidateGitBranch();
-
-  const status = await waitForGitStatus(
-    repo,
-    (s) => s.staged === 1 && s.unstaged === 1 && s.untracked === 1,
-  );
-  assert.equal(status.staged, 1);
-  assert.equal(status.unstaged, 1);
-  assert.equal(status.untracked, 1);
-});
-
-test("git status ignores oversized porcelain output", async () => {
-  const cwd = mkdtempSync(join(tmpdir(), "powerline-git-huge-output-"));
-  const binDir = join(cwd, "bin");
-  mkdirSync(binDir, { recursive: true });
-  const gitPath = join(binDir, "git");
-  writeFileSync(gitPath, "#!/bin/sh\nif [ \"$1\" = \"status\" ]; then yes ' M huge-file' | head -n 80000; exit 0; fi\nexit 1\n", "utf8");
-  chmodSync(gitPath, 0o700);
-
-  const originalPath = process.env.PATH;
-  process.env.PATH = `${binDir}${delimiter}${originalPath ?? ""}`;
-  try {
-    invalidateGitStatus();
-    invalidateGitBranch();
-    getGitStatus(null, "full", cwd);
-    await new Promise((resolve) => setTimeout(resolve, 900));
-
-    const status = getGitStatus(null, "full", cwd);
-    assert.equal(status.staged, 0);
-    assert.equal(status.unstaged, 0);
-    assert.equal(status.untracked, 0);
-  } finally {
-    if (originalPath === undefined) {
-      delete process.env.PATH;
-    } else {
-      process.env.PATH = originalPath;
-    }
-  }
-});
-
-test("git status timeout kills helper process groups", async (t) => {
-  if (process.platform === "win32") {
-    t.skip("process group signaling differs on Windows");
-    return;
-  }
-
-  const cwd = mkdtempSync(join(tmpdir(), "powerline-git-process-group-"));
-  const binDir = join(cwd, "bin");
-  mkdirSync(binDir, { recursive: true });
-  const childPidPath = join(cwd, "child.pid");
-  const gitPath = join(binDir, "git");
-  writeFileSync(gitPath, `#!/bin/sh
-if [ "$1" = "branch" ]; then echo main; exit 0; fi
-if [ "$1" = "status" ]; then
-  sleep 5 &
-  echo $! > ${quoteForShell(childPidPath)}
-  sleep 5
-  exit 0
-fi
-exit 1
-`, "utf8");
-  chmodSync(gitPath, 0o700);
-
-  const originalPath = process.env.PATH;
-  process.env.PATH = `${binDir}${delimiter}${originalPath ?? ""}`;
-  let childPid = 0;
-  try {
-    invalidateGitStatus();
-    invalidateGitBranch();
-    getGitStatus(null, "full", cwd);
-
-    const pidDeadline = Date.now() + 500;
-    while (Date.now() < pidDeadline && childPid === 0) {
-      childPid = readStatusCount(childPidPath);
-      await new Promise((resolve) => setTimeout(resolve, 25));
-    }
-    assert.ok(childPid > 0, "expected fake git to start a helper child");
-
-    const killDeadline = Date.now() + 1000;
-    while (Date.now() < killDeadline && isProcessAlive(childPid)) {
-      await new Promise((resolve) => setTimeout(resolve, 25));
-    }
-    assert.equal(isProcessAlive(childPid), false, "timed-out git helper child should be killed");
-  } finally {
-    if (childPid > 0 && isProcessAlive(childPid)) {
-      try {
-        process.kill(childPid, "SIGKILL");
-      } catch {
-        // Already gone.
-      }
-    }
-    if (originalPath === undefined) {
-      delete process.env.PATH;
-    } else {
-      process.env.PATH = originalPath;
-    }
-  }
-});
-
-test("git status invalidation starts a fresh fetch when an old one is pending", async () => {
-  const cwd = mkdtempSync(join(tmpdir(), "powerline-git-pending-invalidation-"));
-  const binDir = join(cwd, "bin");
-  mkdirSync(binDir, { recursive: true });
-  const countPath = join(cwd, "status-count");
-  const firstPidPath = join(cwd, "first-status.pid");
-  const gitPath = join(binDir, "git");
-  writeFileSync(gitPath, `#!/bin/sh
-if [ "$1" = "branch" ]; then echo main; exit 0; fi
-if [ "$1" = "status" ]; then
-  count=$(cat ${quoteForShell(countPath)} 2>/dev/null || echo 0)
-  count=$((count + 1))
-  echo "$count" > ${quoteForShell(countPath)}
-  if [ "$count" = "1" ]; then echo $$ > ${quoteForShell(firstPidPath)}; sleep 5; exit 0; fi
-  echo '?? fresh-file'
-  exit 0
-fi
-exit 1
-`, "utf8");
-  chmodSync(gitPath, 0o700);
-
-  const originalPath = process.env.PATH;
-  process.env.PATH = `${binDir}${delimiter}${originalPath ?? ""}`;
-  try {
-    invalidateGitStatus();
-    invalidateGitBranch();
-    getGitStatus(null, "full", cwd);
-    const firstDeadline = Date.now() + 500;
-    while (Date.now() < firstDeadline && (readStatusCount(countPath) < 1 || readStatusCount(firstPidPath) < 1)) {
-      await new Promise((resolve) => setTimeout(resolve, 25));
-    }
-    const firstPid = readStatusCount(firstPidPath);
-    assert.ok(firstPid > 0, "expected first git status fetch to record its pid before invalidation");
-
-    invalidateGitStatus();
-    getGitStatus(null, "full", cwd);
-
-    const deadline = Date.now() + 500;
-    while (Date.now() < deadline && readStatusCount(countPath) < 2) {
-      await new Promise((resolve) => setTimeout(resolve, 25));
-    }
-
-    assert.ok(readStatusCount(countPath) >= 2, `expected a second git status fetch after invalidation, got count ${readStatusCount(countPath)}`);
-
-    if (process.platform !== "win32") {
-      const killDeadline = Date.now() + 1000;
-      while (Date.now() < killDeadline && firstPid > 0 && isProcessAlive(firstPid)) {
-        await new Promise((resolve) => setTimeout(resolve, 25));
-      }
-      assert.equal(isProcessAlive(firstPid), false, "invalidated git status fetch should be aborted");
-    }
-  } finally {
-    if (originalPath === undefined) {
-      delete process.env.PATH;
-    } else {
-      process.env.PATH = originalPath;
-    }
-  }
-});
-
-test("git status update listener fires after async cache refresh", async () => {
-  const repo = mkdtempSync(join(tmpdir(), "powerline-git-listener-"));
-  initRepo(repo, "main");
-  writeFileSync(join(repo, "untracked.txt"), "u\n");
+test("status refresh preserves dirty coloring data until new counts arrive", async (t) => {
+  const { repo, git } = fixture(t);
+  const cwd = repo("main", "github.com");
   let updates = 0;
-  setGitStatusUpdateListener(() => {
-    updates += 1;
-  });
+  t.after(subscribeGitUpdates(() => { updates += 1; }));
+  writeFileSync(join(cwd, "tracked"), "first");
+  git(cwd, "add", "tracked");
+  getGitStatus("main", "full", cwd);
+  await waitForGitUpdates();
+  assert.ok(updates > 0);
+  assert.deepEqual(getGitStatus("main", "full", cwd), { branch: "main", staged: 1, unstaged: 0, untracked: 0 });
+  writeFileSync(join(cwd, "tracked"), "second");
+  writeFileSync(join(cwd, "new"), "new");
+  invalidateGitStatus();
+  assert.equal(getGitStatus("main", "full", cwd).staged, 1);
+  await waitForGitUpdates();
+  assert.deepEqual(getGitStatus("main", "full", cwd), { branch: "main", staged: 1, unstaged: 1, untracked: 1 });
+  assert.deepEqual(getGitStatus("main", "branch", cwd), { branch: "main", staged: 0, unstaged: 0, untracked: 0 });
+});
 
+test("unchanged git refreshes settle without requesting another render", async (t) => {
+  const { repo } = fixture(t);
+  const cwd = repo("main", "github.com");
+  writeFileSync(join(cwd, "dirty"), "dirty");
+  getGitStatus("main", "full", cwd);
+  await waitForGitUpdates();
+
+  let renders = 0;
+  const rendered: ReturnType<typeof getGitStatus>[] = [];
+  t.after(subscribeGitUpdates(() => {
+    renders += 1;
+    rendered.push(getGitStatus("main", "full", cwd));
+  }));
+
+  invalidateGitStatus();
+  getGitStatus("main", "full", cwd);
+  await waitForGitUpdates();
+  assert.equal(renders, 0);
+  assert.deepEqual(rendered, []);
+
+  writeFileSync(join(cwd, "another"), "dirty");
+  invalidateGitStatus();
+  getGitStatus("main", "full", cwd);
+  await waitForGitUpdates();
+  assert.equal(renders, 1);
+  assert.deepEqual(rendered, [{ branch: "main", staged: 0, unstaged: 0, untracked: 2 }]);
+});
+
+test("fallback branch refresh serves stale only within the same cwd", async (t) => {
+  const { repo, git } = fixture(t);
+  const cwd = repo("main", "github.com");
+  getCurrentBranch(null, cwd);
+  await waitForGitUpdates();
+  assert.equal(getCurrentBranch(null, cwd), "main");
+  let updates = 0;
+  t.after(subscribeGitUpdates(() => { updates += 1; }));
+  invalidateGitBranch();
+  assert.equal(getCurrentBranch(null, cwd), "main");
+  await waitForGitUpdates();
+  assert.equal(updates, 0);
+  git(cwd, "symbolic-ref", "HEAD", "refs/heads/feature");
+  invalidateGitBranch();
+  assert.equal(getCurrentBranch(null, cwd), "main");
+  await waitForGitUpdates();
+  assert.equal(updates, 1);
+  assert.equal(getCurrentBranch(null, cwd), "feature");
+  assert.equal(getCurrentBranch("external", cwd), "external");
+  assert.equal(getCurrentBranch("main", cwd), "main");
+});
+
+test("detached branch fallback repaints when lookup resolves to no branch", async (t) => {
+  const { root } = fixture(t);
+  let updates = 0;
+  t.after(subscribeGitUpdates(() => { updates += 1; }));
+
+  assert.equal(getCurrentBranch("detached", root), "detached");
+  await waitForGitUpdates();
+
+  assert.equal(updates, 1);
+  assert.equal(getCurrentBranch("detached", root), null);
+});
+
+test("branch lookup works when git lacks branch --show-current", { skip: process.platform === "win32" ? "POSIX shim" : false }, async (t) => {
+  const { repo } = fixture(t);
+  const cwd = repo("legacy", "github.com");
+  const bin = join(cwd, "bin");
+  const log = join(cwd, "git-calls.log");
+  mkdirSync(bin);
+  writeFileSync(
+    join(bin, "git"),
+    `#!/bin/sh\necho "$*" >> ${JSON.stringify(log)}\nif [ "$1 $2" = "branch --show-current" ]; then exit 129; fi\nif [ "$1 $2 $3" = "symbolic-ref --short HEAD" ]; then echo legacy; exit 0; fi\nexit 1\n`,
+    { mode: 0o755 },
+  );
+
+  const originalPath = process.env.PATH;
+  process.env.PATH = `${bin}:${originalPath ?? ""}`;
   try {
-    invalidateGitStatus();
     invalidateGitBranch();
-    getGitStatus(null, "full", repo);
-
-    const deadline = Date.now() + 2000;
-    while (updates === 0 && Date.now() < deadline) {
-      await new Promise((resolve) => setTimeout(resolve, 25));
-    }
-
-    assert.ok(updates > 0, "expected async git refresh to request a repaint");
+    assert.equal(getCurrentBranch(null, cwd), null);
+    await waitForGitUpdates();
+    assert.equal(getCurrentBranch(null, cwd), "legacy");
   } finally {
-    setGitStatusUpdateListener(null);
+    process.env.PATH = originalPath;
+    invalidateGitBranch();
   }
+
+  const calls = readFileSync(log, "utf8");
+  assert.match(calls, /^symbolic-ref --short HEAD$/m);
+  assert.doesNotMatch(calls, /^branch --show-current$/m);
 });
 
-test("branch-only polling reports branch without dirty counts", async () => {
-  const repo = mkdtempSync(join(tmpdir(), "powerline-git-branch-only-"));
-  initRepo(repo, "main");
-  writeFileSync(join(repo, "untracked.txt"), "u\n");
-
-  invalidateGitStatus();
+test("cwd changes clear displayed status, branch and host, including in-flight reads", async (t) => {
+  const { repo, root } = fixture(t);
+  const a = repo("alpha", "github.com");
+  const b = repo("beta", "gitlab.com");
+  writeFileSync(join(a, "dirty"), "dirty");
+  getGitStatus(null, "full", a);
+  getGitRemoteHost(a);
+  await waitForGitUpdates();
+  assert.equal(getGitStatus(null, "full", a).untracked, 1);
+  assert.equal(getGitRemoteHost(a), "github");
   invalidateGitBranch();
-
-  const status = await waitForGitStatus(repo, (s) => s.branch === "main", "branch");
-  assert.equal(status.branch, "main");
-  assert.equal(status.staged, 0);
-  assert.equal(status.unstaged, 0);
-  assert.equal(status.untracked, 0);
-});
-
-test("git branch falls back to short sha for detached HEAD", async () => {
-  const repo = mkdtempSync(join(tmpdir(), "powerline-git-detached-"));
-  initRepo(repo, "main");
-  writeFileSync(join(repo, "tracked.txt"), "v1\n");
-  git(repo, "add", "tracked.txt");
-  git(repo, "commit", "-m", "init");
-  git(repo, "checkout", "--detach", "HEAD");
-
   invalidateGitStatus();
-  invalidateGitBranch();
-
-  const status = await waitForGitStatus(repo, (s) => /[0-9a-f]+ \(detached\)/.test(s.branch ?? ""), "branch");
-  assert.match(status.branch ?? "", /^[0-9a-f]+ \(detached\)$/);
+  getGitStatus(null, "full", a);
+  getGitRemoteHost(a);
+  const oldReads = waitForGitUpdates();
+  assert.deepEqual(getGitStatus(null, "off", b), { branch: null, staged: 0, unstaged: 0, untracked: 0 });
+  await oldReads;
+  assert.deepEqual(getGitStatus(null, "full", b), { branch: null, staged: 0, unstaged: 0, untracked: 0 });
+  assert.equal(getGitRemoteHost(b), null);
+  await waitForGitUpdates();
+  assert.deepEqual(getGitStatus(null, "full", b), { branch: "beta", staged: 0, unstaged: 0, untracked: 0 });
+  assert.equal(getGitRemoteHost(b), "gitlab");
+  assert.deepEqual(getGitStatus(null, "full", root), { branch: null, staged: 0, unstaged: 0, untracked: 0 });
+  getGitRemoteHost(root);
+  await waitForGitUpdates();
+  assert.equal(getGitRemoteHost(root), null);
+  assert.deepEqual(getGitStatus(null, "full", root), { branch: null, staged: 0, unstaged: 0, untracked: 0 });
 });
 
-test("git status counts a staged rename as a single staged change", async () => {
-  const repo = mkdtempSync(join(tmpdir(), "powerline-git-rename-"));
-  initRepo(repo, "main");
-  writeFileSync(join(repo, "old.txt"), "contents that stay identical after rename\n");
-  git(repo, "add", "old.txt");
-  git(repo, "commit", "-m", "init");
-  git(repo, "mv", "old.txt", "new.txt");
-
-  invalidateGitStatus();
-  invalidateGitBranch();
-
-  const status = await waitForGitStatus(
-    repo,
-    (s) => s.staged === 1 && s.untracked === 0,
-  );
-  assert.equal(status.staged, 1);
-  assert.equal(status.unstaged, 0);
-  assert.equal(status.untracked, 0);
+test("attached, detached and worktree branch displays follow repository transitions", async (t) => {
+  const { repo, git, root } = fixture(t);
+  const cwd = repo("main", "github.com");
+  writeFileSync(join(cwd, "tracked"), "original");
+  git(cwd, "add", "tracked");
+  // A fixture-only commit supplies a real detached HEAD and linked worktree.
+  git(cwd, "-c", "user.name=Test", "-c", "user.email=test@example.com", "-c", "commit.gpgSign=false", "commit", "--allow-empty", "-qm", "fixture");
+  const sha = git(cwd, "rev-parse", "--short", "HEAD");
+  assert.equal(getCurrentBranch("main", cwd), "main");
+  git(cwd, "checkout", "-q", "--detach");
+  assert.equal(getCurrentBranch("detached", cwd), "detached");
+  await waitForGitUpdates();
+  assert.equal(getCurrentBranch("detached", cwd), `${sha} (detached)`);
+  git(cwd, "checkout", "-q", "main");
+  assert.equal(getCurrentBranch("main", cwd), "main");
+  const worktree = join(root, "linked");
+  git(cwd, "worktree", "add", "-qb", "feature", worktree);
+  assert.equal(getCurrentBranch(null, worktree), null);
+  await waitForGitUpdates();
+  assert.equal(getCurrentBranch(null, worktree), "feature");
+  writeFileSync(join(worktree, "tracked"), "modified");
+  writeFileSync(join(worktree, "dirty"), "dirty");
+  getGitStatus("feature", "full", worktree);
+  await waitForGitUpdates();
+  assert.deepEqual(getGitStatus("feature", "full", worktree), { branch: "feature", staged: 0, unstaged: 1, untracked: 1 });
+  assert.deepEqual(getGitStatus("main", "off", cwd), { branch: "main", staged: 0, unstaged: 0, untracked: 0 });
 });
 
-function quoteForShell(value: string): string {
-  return `'${value.replace(/'/g, `'"'"'`)}'`;
-}
+test("status refresh honors the configured TTL", async (t) => {
+  const { repo } = fixture(t);
+  const cwd = repo("main", "github.com");
+  let now = 1_000;
+  t.mock.method(Date, "now", () => now);
 
-function readStatusCount(filePath: string): number {
-  try {
-    return Number.parseInt(readFileSync(filePath, "utf8"), 10) || 0;
-  } catch {
-    return 0;
-  }
-}
+  writeFileSync(join(cwd, "dirty"), "dirty");
+  getGitStatus("main", "full", cwd, 10_000);
+  await waitForGitUpdates();
+  assert.deepEqual(getGitStatus("main", "full", cwd, 10_000), { branch: "main", staged: 0, unstaged: 0, untracked: 1 });
 
-function isProcessAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-}
+  // Inside the configured TTL, no background refresh picks up the new file.
+  writeFileSync(join(cwd, "another"), "dirty");
+  now += 5_000;
+  getGitStatus("main", "full", cwd, 10_000);
+  await waitForGitUpdates();
+  assert.deepEqual(getGitStatus("main", "full", cwd, 10_000), { branch: "main", staged: 0, unstaged: 0, untracked: 1 });
 
-function initRepo(cwd: string, branch: string): void {
-  const result = spawnSync("git", ["init", "-b", branch], { cwd, stdio: "ignore" });
-  assert.equal(result.status, 0, `git init failed for ${cwd}`);
-}
+  // Once the TTL elapsed, the next render refreshes in the background.
+  now += 5_000;
+  getGitStatus("main", "full", cwd, 10_000);
+  await waitForGitUpdates();
+  assert.deepEqual(getGitStatus("main", "full", cwd, 10_000), { branch: "main", staged: 0, unstaged: 0, untracked: 2 });
+});
 
-function git(cwd: string, ...args: string[]): void {
-  const result = spawnSync(
-    "git",
-    ["-c", "user.email=test@example.com", "-c", "user.name=Test", ...args],
-    { cwd, stdio: "ignore" },
-  );
-  assert.equal(result.status, 0, `git ${args.join(" ")} failed in ${cwd}`);
-}
+test("status refresh defaults to a one-second TTL", async (t) => {
+  const { repo } = fixture(t);
+  const cwd = repo("main", "github.com");
+  let now = 1_000;
+  t.mock.method(Date, "now", () => now);
 
-async function waitForGitStatus(
-  cwd: string,
-  predicate: (status: ReturnType<typeof getGitStatus>) => boolean,
-  pollingMode: Parameters<typeof getGitStatus>[1] = "full",
-): Promise<ReturnType<typeof getGitStatus>> {
-  const deadline = Date.now() + 2000;
-  while (Date.now() < deadline) {
-    const status = getGitStatus(null, pollingMode, cwd);
-    if (predicate(status)) {
-      return status;
-    }
-    await new Promise((resolve) => setTimeout(resolve, 25));
-  }
+  writeFileSync(join(cwd, "dirty"), "dirty");
+  getGitStatus("main", "full", cwd);
+  await waitForGitUpdates();
+  assert.deepEqual(getGitStatus("main", "full", cwd), { branch: "main", staged: 0, unstaged: 0, untracked: 1 });
 
-  const status = getGitStatus(null, pollingMode, cwd);
-  assert.fail(`timed out waiting for git status in ${cwd}: ${JSON.stringify(status)}`);
-}
+  writeFileSync(join(cwd, "another"), "dirty");
+  now += 999;
+  getGitStatus("main", "full", cwd);
+  await waitForGitUpdates();
+  assert.deepEqual(getGitStatus("main", "full", cwd), { branch: "main", staged: 0, unstaged: 0, untracked: 1 });
+
+  now += 1;
+  getGitStatus("main", "full", cwd);
+  await waitForGitUpdates();
+  assert.deepEqual(getGitStatus("main", "full", cwd), { branch: "main", staged: 0, unstaged: 0, untracked: 2 });
+});
+
+test("detectGitHost recognizes known hosts over SSH and HTTPS", () => {
+  assert.equal(detectGitHost("git@github.com:owner/repo.git"), "github");
+  assert.equal(detectGitHost("https://github.com/owner/repo.git"), "github");
+  assert.equal(detectGitHost("ssh://git@gitlab.com/owner/repo.git"), "gitlab");
+  assert.equal(detectGitHost("https://gitlab.com/owner/repo"), "gitlab");
+  assert.equal(detectGitHost("git@bitbucket.org:owner/repo.git"), "bitbucket");
+  assert.equal(detectGitHost("https://user@bitbucket.org/owner/repo.git"), "bitbucket");
+});
+
+test("detectGitHost normalizes www and sub-domains", () => {
+  assert.equal(detectGitHost("https://www.github.com/owner/repo"), "github");
+  assert.equal(detectGitHost("git@ssh.github.com:owner/repo.git"), "github");
+});
+
+test("detectGitHost treats unknown or self-hosted remotes as a generic host", () => {
+  assert.equal(detectGitHost("git@git.example.com:owner/repo.git"), "other");
+  assert.equal(detectGitHost("https://gitea.mycorp.dev/owner/repo.git"), "other");
+  assert.equal(detectGitHost("/srv/git/local.git"), "other");
+});
+
+test("detectGitHost returns null when there is no remote", () => {
+  assert.equal(detectGitHost(null), null);
+  assert.equal(detectGitHost(""), null);
+  assert.equal(detectGitHost("   "), null);
+});
+
+test("remote refreshes notify only when the displayed host changes", async (t) => {
+  const { repo, git } = fixture(t);
+  const cwd = repo("main", "github.com");
+  let now = 1_000;
+  t.mock.method(Date, "now", () => now);
+  getGitRemoteHost(cwd);
+  await waitForGitUpdates();
+
+  let updates = 0;
+  const hosts: ReturnType<typeof getGitRemoteHost>[] = [];
+  t.after(subscribeGitUpdates(() => {
+    updates += 1;
+    hosts.push(getGitRemoteHost(cwd));
+  }));
+
+  now += 60_000;
+  assert.equal(getGitRemoteHost(cwd), "github");
+  await waitForGitUpdates();
+  assert.equal(updates, 0);
+
+  git(cwd, "remote", "set-url", "origin", "https://gitlab.com/owner/repo");
+  now += 60_000;
+  assert.equal(getGitRemoteHost(cwd), "github");
+  await waitForGitUpdates();
+  assert.equal(updates, 1);
+  assert.deepEqual(hosts, ["gitlab"]);
+});

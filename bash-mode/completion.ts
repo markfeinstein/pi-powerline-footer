@@ -1,11 +1,8 @@
-import { opendirSync } from "node:fs";
-import type { Dirent } from "node:fs";
-import { spawn, type ChildProcessByStdio } from "node:child_process";
-import type { Readable } from "node:stream";
-import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
-import { homedir } from "node:os";
+import { readdirSync } from "node:fs";
+import { execFile } from "node:child_process";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import type { AutocompleteItem, AutocompleteProvider, AutocompleteSuggestions } from "@earendil-works/pi-tui";
-import { containsShellHistorySecret, matchHistoryEntries, readGlobalShellHistory, readProjectHistory } from "./history.ts";
+import { matchHistoryEntries, readGlobalShellHistory, readProjectHistory } from "./history.ts";
 import type { ExtendedCompletionItem, GhostSuggestion } from "./types.ts";
 
 interface TokenContext {
@@ -31,12 +28,6 @@ const GIT_SUBCOMMANDS = [
   "grep", "init", "log", "merge", "mv", "pull", "push", "rebase", "reset", "restore", "revert", "rm",
   "show", "stash", "status", "switch", "tag", "worktree",
 ];
-const GIT_REF_CACHE_TTL_MS = 5_000;
-const GIT_COMPLETION_TIMEOUT_MS = 250;
-const GIT_COMPLETION_MAX_BUFFER = 256 * 1024;
-const PATH_COMPLETION_MAX_RESULTS = 100;
-const PATH_COMPLETION_MAX_SCAN_ENTRIES = 2000;
-const gitRefsCache = new Map<string, { at: number; refs: string[] }>();
 
 function tokenizeBeforeCursor(text: string): string[] {
   const tokens: string[] = [];
@@ -84,89 +75,26 @@ function tokenizeBeforeCursor(text: string): string[] {
   return tokens;
 }
 
-function findShellTokenStart(beforeCursor: string): number {
-  let tokenStart = 0;
-  let quote: "'" | '"' | null = null;
-  let escaped = false;
-
-  for (let i = 0; i < beforeCursor.length; i += 1) {
-    const char = beforeCursor[i]!;
-    if (escaped) {
-      escaped = false;
-      continue;
-    }
-
-    if (char === "\\") {
-      escaped = true;
-      continue;
-    }
-
-    if (quote) {
-      if (char === quote) quote = null;
-      continue;
-    }
-
-    if (char === "'" || char === '"') {
-      quote = char;
-      continue;
-    }
-
-    if (/\s/.test(char)) {
-      tokenStart = i + 1;
-    }
-  }
-
-  return tokenStart;
-}
-
-function findShellTokenEnd(line: string, cursorCol: number): number {
-  let quote: "'" | '"' | null = null;
-  let escaped = false;
-  let tokenEnd = cursorCol;
-
-  for (let i = findShellTokenStart(line.slice(0, cursorCol)); i < line.length; i += 1) {
-    const char = line[i]!;
-    if (escaped) {
-      escaped = false;
-      tokenEnd = i + 1;
-      continue;
-    }
-
-    if (char === "\\") {
-      escaped = true;
-      tokenEnd = i + 1;
-      continue;
-    }
-
-    if (quote) {
-      if (char === quote) quote = null;
-      tokenEnd = i + 1;
-      continue;
-    }
-
-    if (char === "'" || char === '"') {
-      quote = char;
-      tokenEnd = i + 1;
-      continue;
-    }
-
-    if (/\s/.test(char)) break;
-    tokenEnd = i + 1;
-  }
-
-  return tokenEnd;
-}
-
 function getTokenContext(line: string, cursorCol: number): TokenContext {
   const beforeCursor = line.slice(0, cursorCol);
   const afterCursor = line.slice(cursorCol);
   const tokens = tokenizeBeforeCursor(beforeCursor);
-  const tokenStart = findShellTokenStart(beforeCursor);
-  const tokenEnd = findShellTokenEnd(line, cursorCol);
 
-  const tokenIndex = beforeCursor.length > 0 && /\s/.test(beforeCursor[beforeCursor.length - 1] ?? "")
-    ? tokens.length
-    : Math.max(0, tokens.length - 1);
+  let tokenStart = 0;
+  for (let i = beforeCursor.length - 1; i >= 0; i -= 1) {
+    const char = beforeCursor[i];
+    if (char && /\s/.test(char)) {
+      tokenStart = i + 1;
+      break;
+    }
+  }
+
+  let tokenEnd = cursorCol;
+  for (let i = cursorCol; i < line.length; i += 1) {
+    const char = line[i];
+    if (char && /\s/.test(char)) break;
+    tokenEnd = i + 1;
+  }
 
   return {
     line,
@@ -176,7 +104,7 @@ function getTokenContext(line: string, cursorCol: number): TokenContext {
     token: line.slice(tokenStart, tokenEnd),
     tokenStart,
     tokenEnd,
-    tokenIndex,
+    tokenIndex: Math.max(0, tokens.length - 1),
     previousTokens: tokens,
   };
 }
@@ -230,81 +158,41 @@ function uniqueByReplacement(items: ExtendedCompletionItem[]): ExtendedCompletio
   return [...best.values()].sort((a, b) => b.score - a.score || a.label.localeCompare(b.label));
 }
 
-function unescapeShellPathToken(token: string): { path: string; quote: "'" | '"' | null } {
-  const quote = token[0] === "'" || token[0] === '"' ? token[0] : null;
-  const raw = quote ? token.slice(1) : token;
-  const value = quote && raw.endsWith(quote) ? raw.slice(0, -1) : raw;
+function pathBase(token: string, cwd: string): { dir: string; prefix: string; displayPrefix: string } {
+  const expanded = token.startsWith("~/")
+    ? join(process.env.HOME || "", token.slice(2))
+    : token;
 
-  if (quote === "'") {
-    return { path: value, quote };
+  const hasSlash = expanded.includes("/");
+  if (!hasSlash) {
+    return { dir: cwd, prefix: expanded, displayPrefix: "" };
   }
 
-  return {
-    path: value.replace(/\\(.)/g, "$1"),
-    quote,
-  };
-}
-
-function getHomeDir(): string {
-  return process.env.HOME || process.env.USERPROFILE || homedir();
-}
-
-function pathBase(token: string, cwd: string): { dir: string; prefix: string; displayPrefix: string; quote: "'" | '"' | null } {
-  const parsed = unescapeShellPathToken(token);
-  const expanded = !parsed.quote && parsed.path.startsWith("~/")
-    ? join(getHomeDir(), parsed.path.slice(2))
-    : parsed.path;
-
-  const hasDirectoryPart = expanded.includes("/") || (sep === "\\" && expanded.includes("\\"));
-  if (!hasDirectoryPart) {
-    return { dir: cwd, prefix: expanded, displayPrefix: parsed.quote ?? "", quote: parsed.quote };
-  }
-
-  const hasTrailingDirectorySeparator = parsed.path.endsWith("/") || expanded.endsWith("/");
-  const baseDir = hasTrailingDirectorySeparator ? expanded : dirname(expanded);
+  const baseDir = expanded.endsWith("/") ? expanded.slice(0, -1) : dirname(expanded);
   const resolvedDir = isAbsolute(baseDir) ? baseDir : resolve(cwd, baseDir);
-  const prefix = hasTrailingDirectorySeparator ? "" : basename(expanded);
-  const tokenSlashIndex = token.lastIndexOf("/");
-  const displayPrefix = tokenSlashIndex === -1
-    ? (parsed.quote ?? "")
-    : token.slice(0, token.endsWith("/") ? token.length : tokenSlashIndex + 1);
-  return { dir: resolvedDir, prefix, displayPrefix, quote: parsed.quote };
+  const prefix = expanded.endsWith("/") ? "" : basename(expanded);
+  const displayPrefix = token.endsWith("/") ? token : token.slice(0, Math.max(0, token.length - prefix.length));
+  return { dir: resolvedDir, prefix, displayPrefix };
 }
 
 function escapeShellPath(value: string): string {
-  return value.replace(/([\\\s"'`$&|;<>()[\]{}?!*#])/g, "\\$1");
-}
-
-function escapeQuotedPathSegment(value: string, quote: "'" | '"'): string {
-  if (quote === "'") {
-    return value.replace(/'/g, `'\\''`);
-  }
-  return value.replace(/(["\\$`])/g, "\\$1");
+  return value.replace(/([\\\s"'`$&|;<>()[\]{}?!*])/g, "\\$1");
 }
 
 function getPathSuggestions(token: string, cwd: string): ExtendedCompletionItem[] {
   if (!token) return [];
-  const { dir, prefix, displayPrefix, quote } = pathBase(token, cwd);
-  const items: ExtendedCompletionItem[] = [];
-  let handle: ReturnType<typeof opendirSync> | null = null;
+  const { dir, prefix, displayPrefix } = pathBase(token, cwd);
 
   try {
-    handle = opendirSync(dir);
-    let scanned = 0;
-    let entry: Dirent | null;
-    while (
-      items.length < PATH_COMPLETION_MAX_RESULTS &&
-      scanned < PATH_COMPLETION_MAX_SCAN_ENTRIES &&
-      (entry = handle.readSync()) !== null
-    ) {
-      scanned++;
-      if (prefix.length > 0 && !entry.name.startsWith(prefix)) continue;
+    const entries = readdirSync(dir, { withFileTypes: true })
+      .filter((entry) => prefix.length === 0 || entry.name.startsWith(prefix))
+      .slice(0, 100);
 
+    return entries.map((entry) => {
       const suffix = entry.isDirectory() ? "/" : "";
       const label = `${displayPrefix}${entry.name}${suffix}`;
-      const escapedName = quote ? escapeQuotedPathSegment(entry.name, quote) : escapeShellPath(entry.name);
-      const replacement = `${displayPrefix}${escapedName}${suffix}`;
-      items.push({
+      const replacement = `${displayPrefix}${escapeShellPath(entry.name)}${suffix}`;
+      return {
         value: replacement,
         label,
         replacement,
@@ -312,124 +200,36 @@ function getPathSuggestions(token: string, cwd: string): ExtendedCompletionItem[
         endCol: 0,
         source: "path",
         score: 40 + (entry.isDirectory() ? 4 : 0),
-      });
-    }
-
-    return items;
+      } satisfies ExtendedCompletionItem;
+    });
   } catch {
     // Missing or unreadable directories should only remove this completion source.
     return [];
-  } finally {
-    try {
-      handle?.closeSync();
-    } catch {
-      // Best effort; completions should not fail because closing a directory handle failed.
-    }
   }
 }
 
-async function runGit(args: string[], cwd: string, signal?: AbortSignal): Promise<string[]> {
-  if (signal?.aborted) return [];
-
+function runGit(args: string[], cwd: string, signal: AbortSignal): Promise<string[]> {
   return new Promise((resolve) => {
-    let settled = false;
-    let stdout = "";
-    let timedOut = false;
-    let child: ChildProcessByStdio<null, Readable, null> | null = null;
-
-    const killProcessGroup = () => {
-      if (!child || child.pid === undefined) return;
-      try {
-        if (process.platform !== "win32") {
-          process.kill(-child.pid, "SIGKILL");
-        } else {
-          child.kill("SIGKILL");
-        }
-      } catch {
-        try {
-          child.kill("SIGKILL");
-        } catch {
-          // The process may have already exited.
-        }
-      }
-    };
-
-    const finish = (lines: string[]) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      signal?.removeEventListener("abort", onAbort);
-      resolve(lines);
-    };
-
-    const onAbort = () => {
-      killProcessGroup();
-      finish([]);
-    };
-
-    const timer = setTimeout(() => {
-      timedOut = true;
-      killProcessGroup();
-      finish([]);
-    }, GIT_COMPLETION_TIMEOUT_MS);
-
-    signal?.addEventListener("abort", onAbort, { once: true });
-    if (signal?.aborted) {
-      onAbort();
-      return;
-    }
-
     try {
-      child = spawn("git", args, {
-        cwd,
-        detached: process.platform !== "win32",
-        stdio: ["ignore", "pipe", "ignore"],
+      execFile("git", args, { cwd, encoding: "utf8", signal, windowsHide: true }, (error, stdout) => {
+        if (error || !stdout) {
+          resolve([]);
+          return;
+        }
+        resolve(stdout.split("\n").map((line) => line.trim()).filter(Boolean));
       });
     } catch {
-      finish([]);
-      return;
+      // Git-aware completions are optional and should not break the main completion flow.
+      resolve([]);
     }
-
-    child.stdout.setEncoding("utf8");
-    child.stdout.on("data", (chunk) => {
-      stdout += String(chunk);
-      if (stdout.length > GIT_COMPLETION_MAX_BUFFER) {
-        killProcessGroup();
-        finish([]);
-      }
-    });
-    child.on("error", () => finish([]));
-    child.on("close", (code) => {
-      if (timedOut || code !== 0 || !stdout) {
-        finish([]);
-        return;
-      }
-      finish(stdout.split("\n").map((line) => line.trim()).filter(Boolean));
-    });
   });
 }
 
-async function getGitRefs(cwd: string, signal?: AbortSignal): Promise<string[]> {
-  if (signal?.aborted) return [];
-
-  const now = Date.now();
-  const cached = gitRefsCache.get(cwd);
-  if (cached && now - cached.at < GIT_REF_CACHE_TTL_MS) {
-    return cached.refs;
-  }
-
-  const refs = [
-    ...await runGit(["branch", "--format=%(refname:short)"], cwd, signal),
-    ...await runGit(["tag", "--list"], cwd, signal),
-  ];
-  const deduped = [...new Set(refs)];
-  if (!signal?.aborted) {
-    gitRefsCache.set(cwd, { at: now, refs: deduped });
-  }
-  return deduped;
-}
-
-async function getGitSuggestions(ctx: TokenContext, cwd: string, signal?: AbortSignal): Promise<ExtendedCompletionItem[]> {
+async function getGitSuggestions(
+  ctx: TokenContext,
+  cwd: string,
+  signal: AbortSignal,
+): Promise<ExtendedCompletionItem[]> {
   const tokens = ctx.previousTokens;
   if (tokens[0] !== "git") return [];
 
@@ -452,16 +252,19 @@ async function getGitSuggestions(ctx: TokenContext, cwd: string, signal?: AbortS
     return [];
   }
 
-  const tokenPrefix = unescapeShellPathToken(ctx.token).path;
-  if (signal?.aborted) return [];
+  const [branches, tags] = await Promise.all([
+    runGit(["branch", "--format=%(refname:short)"], cwd, signal),
+    runGit(["tag", "--list"], cwd, signal),
+  ]);
+  if (signal.aborted) return [];
 
-  return (await getGitRefs(cwd, signal))
-    .filter((ref) => !signal?.aborted && !ref.startsWith("-") && ref.startsWith(tokenPrefix))
+  return [...new Set([...branches, ...tags])]
+    .filter((ref) => ref.startsWith(ctx.token))
     .slice(0, 100)
     .map((ref) => ({
       value: ref,
       label: ref,
-      replacement: escapeShellPath(ref),
+      replacement: ref,
       startCol: 0,
       endCol: 0,
       source: "git",
@@ -488,7 +291,7 @@ function commandHead(value: string): string {
 function findNewestHistoryMatchForHead(entries: string[], prefix: string, head: string): string | null {
   for (const rawEntry of entries) {
     const entry = rawEntry.trim();
-    if (!entry || !entry.startsWith(prefix) || containsShellHistorySecret(entry)) continue;
+    if (!entry || !entry.startsWith(prefix)) continue;
     if (commandHead(entry) !== head) continue;
     return entry;
   }
@@ -569,8 +372,6 @@ export class BashCompletionEngine {
       return this.getCommandPositionGhostSuggestion(line, readGlobalShellHistory(shellPath));
     }
 
-    if (signal.aborted) return null;
-
     const deterministic = await this.getDeterministicInlineSuggestions(ctx, cwd, signal);
     if (signal.aborted) return null;
     const globalHistory = matchHistoryEntries(readGlobalShellHistory(shellPath), line, 5);
@@ -604,11 +405,17 @@ export class BashCompletionEngine {
     return getCuratedCommandFallback(line);
   }
 
-  private async getDeterministicInlineSuggestions(ctx: TokenContext, cwd: string, signal?: AbortSignal): Promise<ExtendedCompletionItem[]> {
-    const items: ExtendedCompletionItem[] = [];
-    items.push(...withRange(await getGitSuggestions(ctx, cwd, signal), ctx.tokenStart, ctx.tokenEnd));
-    if (signal?.aborted) return [];
-    items.push(...withRange(getPathSuggestions(ctx.token, cwd), ctx.tokenStart, ctx.tokenEnd));
+  private async getDeterministicInlineSuggestions(
+    ctx: TokenContext,
+    cwd: string,
+    signal: AbortSignal,
+  ): Promise<ExtendedCompletionItem[]> {
+    const gitSuggestions = getGitSuggestions(ctx, cwd, signal);
+    const pathSuggestions = getPathSuggestions(ctx.token, cwd);
+    const items = [
+      ...withRange(await gitSuggestions, ctx.tokenStart, ctx.tokenEnd),
+      ...withRange(pathSuggestions, ctx.tokenStart, ctx.tokenEnd),
+    ];
 
     return uniqueByReplacement(items);
   }
@@ -624,7 +431,7 @@ export class BashCompletionEngine {
 }
 
 export class BashAutocompleteProvider implements AutocompleteProvider {
-  getSuggestions(): AutocompleteSuggestions | null {
+  async getSuggestions(): Promise<AutocompleteSuggestions | null> {
     return null;
   }
 
@@ -664,7 +471,7 @@ function applyExtendedCompletion(lines: string[], cursorLine: number, item: Exte
 }
 
 export class OneOffBashAutocompleteProvider implements AutocompleteProvider {
-  getSuggestions(): AutocompleteSuggestions | null {
+  async getSuggestions(): Promise<AutocompleteSuggestions | null> {
     return null;
   }
 
@@ -719,12 +526,12 @@ export class ModeAwareAutocompleteProvider implements AutocompleteProvider {
     ];
   }
 
-  getSuggestions(
+  async getSuggestions(
     lines: string[],
     cursorLine: number,
     cursorCol: number,
     options: { signal: AbortSignal; force?: boolean },
-  ): AutocompleteSuggestions | null | Promise<AutocompleteSuggestions | null> {
+  ): Promise<AutocompleteSuggestions | null> {
     if (this.isBashModeActive()) {
       return this.bashProvider.getSuggestions(lines, cursorLine, cursorCol, options);
     }

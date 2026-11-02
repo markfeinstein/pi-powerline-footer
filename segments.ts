@@ -1,10 +1,14 @@
-import { lstatSync, readFileSync } from "node:fs";
-import { homedir, hostname as osHostname } from "node:os";
-import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
-import type { BuiltinStatusLineSegmentId, RenderedSegment, SegmentContext, SemanticColor, StatusLineSegment, StatusLineSegmentId } from "./types.ts";
-import { normalizeCompactExtensionStatus, normalizeExtensionStatusValue, stripTerminalControlSequences } from "./powerline-config.ts";
-import { fg, rainbow, applyColor } from "./theme.ts";
-import { getIcons, hasNerdFonts, SEP_DOT, getThinkingText } from "./icons.ts";
+import { hostname as osHostname } from "node:os";
+import { basename } from "node:path";
+import { visibleWidth } from "@earendil-works/pi-tui";
+import type { BuiltinStatusLineSegmentId, RenderedSegment, RequestCacheUsage, SegmentContext, SemanticColor, StatusLineSegment, StatusLineSegmentId } from "./types.ts";
+import { normalizeCompactExtensionStatus, normalizeExtensionStatusValue } from "./powerline-config.ts";
+import { fg, applyColor } from "./theme.ts";
+import { getIcons, SEP_DOT, getThinkingText } from "./icons.ts";
+import { formatUsdCost } from "./currency-rates.ts";
+import { getGitRemoteHost } from "./git-status.ts";
+import type { IconSet } from "./icons.ts";
+import type { GitHost } from "./git-status.ts";
 
 function color(ctx: SegmentContext, semantic: SemanticColor, text: string): string {
   return fg(ctx.theme, semantic, text, ctx.colors);
@@ -18,19 +22,11 @@ function withIcon(icon: string, text: string): string {
   return icon ? `${icon} ${text}` : text;
 }
 
-function sanitizeSegmentText(value: string): string {
-  return stripTerminalControlSequences(value).replace(/[\r\n\t]/g, " ");
-}
-
 function formatTokens(n: number): string {
   if (n < 1000) return n.toString();
   if (n < 10000) return `${(n / 1000).toFixed(1)}k`;
-  // Round to whole thousands, but if that rounds up to 1000k promote to "1.0M"
-  // instead of emitting a wrong-unit value like "1000k".
-  if (n < 1000000 && Math.round(n / 1000) < 1000) return `${Math.round(n / 1000)}k`;
-  // Show one decimal of millions, but if that rounds up to 10.0 promote to a
-  // whole "10M" so it matches the >=10M formatting instead of showing "10.0M".
-  if (n < 10000000 && Number((n / 1000000).toFixed(1)) < 10) return `${(n / 1000000).toFixed(1)}M`;
+  if (n < 1000000) return `${Math.round(n / 1000)}k`;
+  if (n < 10000000) return `${(n / 1000000).toFixed(1)}M`;
   return `${Math.round(n / 1000000)}M`;
 }
 
@@ -42,57 +38,6 @@ function formatDuration(ms: number): string {
   if (hours > 0) return `${hours}h${minutes % 60}m`;
   if (minutes > 0) return `${minutes}m${seconds % 60}s`;
   return `${seconds}s`;
-}
-
-const MAX_GIT_FILE_BYTES = 4096;
-const BASENAME_PATH_CACHE_LIMIT = 200;
-const basenamePathCache = new Map<string, string>();
-
-function readLinkedWorktreeGitDir(cwd: string): string | null {
-  const gitFile = join(cwd, ".git");
-  try {
-    const stats = lstatSync(gitFile);
-    if (!stats.isFile() || stats.size > MAX_GIT_FILE_BYTES) return null;
-
-    const match = /^gitdir:\s*(.+)$/i.exec(readFileSync(gitFile, "utf-8").trim());
-    if (!match) return null;
-
-    const gitDir = match[1]!.trim();
-    return isAbsolute(gitDir) ? gitDir : resolve(cwd, gitDir);
-  } catch {
-    return null;
-  }
-}
-
-function repoNameFromWorktreeGitDir(gitDir: string): string | null {
-  const worktreesDir = dirname(gitDir);
-  if (basename(worktreesDir) !== "worktrees") return null;
-
-  const commonGitDir = dirname(worktreesDir);
-  const commonGitDirName = basename(commonGitDir);
-  if (commonGitDirName === ".git" || commonGitDirName === ".bare") {
-    return basename(dirname(commonGitDir)) || null;
-  }
-
-  return commonGitDirName.replace(/\.git$/, "") || null;
-}
-
-function formatBasenamePath(pwd: string): string {
-  const cached = basenamePathCache.get(pwd);
-  if (cached) return cached;
-
-  const safePwd = sanitizeSegmentText(pwd);
-  const currentName = basename(safePwd) || safePwd;
-  const gitDir = readLinkedWorktreeGitDir(pwd);
-  const rawRepoName = gitDir ? repoNameFromWorktreeGitDir(gitDir) : null;
-  const repoName = rawRepoName ? sanitizeSegmentText(rawRepoName) : null;
-  const formatted = repoName && repoName !== currentName ? `${repoName}/${currentName}` : currentName;
-
-  if (basenamePathCache.size >= BASENAME_PATH_CACHE_LIMIT) {
-    basenamePathCache.clear();
-  }
-  basenamePathCache.set(pwd, formatted);
-  return formatted;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -108,16 +53,15 @@ const modelSegment: StatusLineSegment = {
     let modelName = ctx.model?.name || ctx.model?.id || "no-model";
     if (opts.display === "qualified" && ctx.model?.id) {
       const provider = ctx.model.provider || ctx.model.providerId || ctx.model.providerName;
-      modelName = provider && !ctx.model.id.includes("/") ? `${provider}/${ctx.model.id}` : ctx.model.id;
+      modelName = provider && !ctx.model.id.startsWith(`${provider}/`) ? `${provider}/${ctx.model.id}` : ctx.model.id;
     } else if (modelName.startsWith("Claude ")) {
       modelName = modelName.slice(7);
     }
-    modelName = sanitizeSegmentText(modelName);
 
     let content = withIcon(icons.model, modelName);
 
     if (opts.showThinkingLevel !== false && ctx.model?.reasoning) {
-      const level = sanitizeSegmentText(ctx.thinkingLevel || "off") || "off";
+      const level = ctx.thinkingLevel || "off";
       if (level !== "off") {
         const thinkingText = getThinkingText(level);
         if (thinkingText) {
@@ -137,9 +81,9 @@ const shellModeSegment: StatusLineSegment = {
       return { content: "", visible: false };
     }
 
-    const shellName = sanitizeSegmentText(ctx.shellName ?? "shell");
+    const shellName = ctx.shellName ?? "shell";
     const state = ctx.shellRunning ? "run" : "idle";
-    const cwd = ctx.shellCwd ? basename(sanitizeSegmentText(ctx.shellCwd)) : null;
+    const cwd = ctx.shellCwd ? basename(ctx.shellCwd) : null;
     const parts = [shellName, state];
     if (cwd) {
       parts.push(cwd);
@@ -156,17 +100,15 @@ const pathSegment: StatusLineSegment = {
     const opts = ctx.options.path ?? {};
     const mode = opts.mode ?? "basename";
 
-    const rawPwd = ctx.shellModeActive && ctx.shellCwd ? ctx.shellCwd : (ctx.cwd ?? process.cwd());
-    let pwd = rawPwd;
-    const home = sanitizeSegmentText(process.env.HOME || process.env.USERPROFILE || homedir());
+    let pwd = ctx.shellModeActive && ctx.shellCwd ? ctx.shellCwd : (ctx.cwd ?? process.cwd());
+    const home = process.env.HOME || process.env.USERPROFILE;
 
     if (mode === "basename") {
-      // Show repo/worktree for linked worktree roots; otherwise just the last component.
-      pwd = formatBasenamePath(rawPwd);
+      // Just the last directory component (cross-platform)
+      pwd = basename(pwd) || pwd;
     } else {
-      pwd = sanitizeSegmentText(pwd);
       // Abbreviate home directory for abbreviated/full modes
-      if (home && (pwd === home || pwd.startsWith(`${home}${sep}`))) {
+      if (home && pwd.startsWith(home)) {
         pwd = `~${pwd.slice(home.length)}`;
       }
 
@@ -179,11 +121,7 @@ const pathSegment: StatusLineSegment = {
       if (mode === "abbreviated") {
         const maxLen = opts.maxLength ?? 40;
         if (pwd.length > maxLen) {
-          if (maxLen <= 1) {
-            pwd = "…";
-          } else {
-            pwd = `…${pwd.slice(-(maxLen - 1))}`;
-          }
+          pwd = `…${pwd.slice(-(maxLen - 1))}`;
         }
       }
     }
@@ -192,6 +130,23 @@ const pathSegment: StatusLineSegment = {
     return { content: color(ctx, "path", content), visible: true };
   },
 };
+
+/**
+ * Icon for the branch label: the origin remote's host logo when hostIcon is
+ * enabled and a remote is known, otherwise the plain branch icon. An
+ * unrecognized remote falls back to the generic git logo.
+ */
+function resolveBranchIcon(icons: IconSet, hostIcon: boolean, cwd: string | undefined): string {
+  if (!hostIcon) return icons.branch;
+  const host = getGitRemoteHost(cwd);
+  const byHost: Record<GitHost, string> = {
+    github: icons.github,
+    gitlab: icons.gitlab,
+    bitbucket: icons.bitbucket,
+    other: icons.git,
+  };
+  return host ? byHost[host] : icons.branch;
+}
 
 const gitSegment: StatusLineSegment = {
   id: "git",
@@ -213,7 +168,8 @@ const gitSegment: StatusLineSegment = {
     let content = "";
     if (showBranch && branch) {
       // Color just the branch name (icon + branch text)
-      content = color(ctx, branchColor, withIcon(icons.branch, sanitizeSegmentText(branch)));
+      const branchIcon = resolveBranchIcon(icons, opts.hostIcon === true, ctx.cwd);
+      content = color(ctx, branchColor, withIcon(branchIcon, branch));
     }
 
     // Add status indicators (each with their own color, not wrapped)
@@ -248,13 +204,27 @@ const gitSegment: StatusLineSegment = {
 const thinkingSegment: StatusLineSegment = {
   id: "thinking",
   render(ctx) {
-    const level = sanitizeSegmentText(ctx.thinkingLevel || "off") || "off";
+    const level = ctx.thinkingLevel || "off";
 
-    // Full level name without an icon or "think:" prefix.
-    const content = level;
+    const levelText: Record<string, string> = {
+      off: "off",
+      minimal: "min",
+      low: "low",
+      medium: "med",
+      high: "high",
+      xhigh: "xhigh",
+    };
+    const label = levelText[level] || level;
+    const content = `think:${label}`;
 
-    if (level === "high" || level === "xhigh") {
-      return { content: rainbow(content), visible: true };
+    if (level === "high") {
+      return { content: color(ctx, "thinkingHigh", content), visible: true };
+    }
+    if (level === "xhigh") {
+      return { content: color(ctx, "thinkingXhigh", content), visible: true };
+    }
+    if (level === "max") {
+      return { content: color(ctx, "thinkingMax", content), visible: true };
     }
 
     if (level === "minimal") {
@@ -281,12 +251,34 @@ const subagentsSegment: StatusLineSegment = {
   },
 };
 
+const queueSegment: StatusLineSegment = {
+  id: "queue",
+  render(ctx) {
+    const summary = ctx.queueSummary;
+    const parts: string[] = [];
+
+    if (summary.compacting && summary.queueCount > 0) {
+      parts.push(`compact q ${summary.queueCount}`);
+    } else if (summary.queueCount > 0) {
+      parts.push(`q ${summary.queueCount}`);
+    }
+
+
+    if (summary.blockedCount > 0) {
+      parts.push(`blocked ${summary.blockedCount}`);
+    }
+
+    if (parts.length === 0) return { content: "", visible: false };
+    return { content: color(ctx, "queue", parts.join(SEP_DOT)), visible: true };
+  },
+};
+
 const tokenInSegment: StatusLineSegment = {
   id: "token_in",
   render(ctx) {
     const icons = getIcons();
     const { input } = ctx.usageStats;
-    if (!input && !ctx.alwaysShowTokens) return { content: "", visible: false };
+    if (!input) return { content: "", visible: false };
 
     const content = withIcon(icons.input, formatTokens(input));
     return { content: color(ctx, "tokens", content), visible: true };
@@ -298,7 +290,7 @@ const tokenOutSegment: StatusLineSegment = {
   render(ctx) {
     const icons = getIcons();
     const { output } = ctx.usageStats;
-    if (!output && !ctx.alwaysShowTokens) return { content: "", visible: false };
+    if (!output) return { content: "", visible: false };
 
     const content = withIcon(icons.output, formatTokens(output));
     return { content: color(ctx, "tokens", content), visible: true };
@@ -321,31 +313,29 @@ const tokenTotalSegment: StatusLineSegment = {
 const costSegment: StatusLineSegment = {
   id: "cost",
   render(ctx) {
-    const icons = getIcons();
-    const { cost } = ctx.usageStats;
+    const cost = ctx.usageStats.cost + (ctx.usageStats.subagentCost ?? 0);
     const usingSubscription = ctx.usingSubscription;
 
     if (!cost && !usingSubscription) {
       return { content: "", visible: false };
     }
 
-    const reportedCost = cost > 0 ? `$${cost.toFixed(2)}` : null;
+    const reportedCost = cost > 0 ? formatUsdCost(cost, ctx.options.cost?.currency) : null;
     if (!usingSubscription) {
       return reportedCost
         ? { content: color(ctx, "cost", reportedCost), visible: true }
         : { content: "", visible: false };
     }
 
-    const subscriptionLabel = hasNerdFonts() ? icons.cost : "(sub)";
     const subscriptionDisplay = ctx.options.cost?.subscriptionDisplay ?? "subscription";
     if (subscriptionDisplay === "reported-cost" && reportedCost) {
       return { content: color(ctx, "cost", reportedCost), visible: true };
     }
     if (subscriptionDisplay === "both" && reportedCost) {
-      return { content: color(ctx, "cost", `${reportedCost} ${subscriptionLabel}`), visible: true };
+      return { content: color(ctx, "cost", `${reportedCost} (sub)`), visible: true };
     }
 
-    return { content: color(ctx, "cost", subscriptionLabel), visible: true };
+    return { content: color(ctx, "cost", "(sub)"), visible: true };
   },
 };
 
@@ -353,26 +343,32 @@ const contextPctSegment: StatusLineSegment = {
   id: "context_pct",
   render(ctx) {
     if (ctx.customCompactionEnabled) return { content: "", visible: false };
-    if (!Number.isFinite(ctx.contextWindow) || ctx.contextWindow <= 0 || !Number.isFinite(ctx.contextPercent)) {
-      return { content: "", visible: false };
-    }
 
     const icons = getIcons();
-    const pct = ctx.contextPercent;
-    const window = ctx.contextWindow;
+    const { contextTokens, contextPercent, contextWindow } = ctx;
 
     const autoIcon = ctx.autoCompactEnabled && icons.auto ? ` ${icons.auto}` : "";
-    const roundedPct = Math.round(pct);
-    const text = `${roundedPct}%/${formatTokens(window)}${autoIcon}`;
+    const percentOnly = ctx.options.context?.format === "percent";
+    const hasKnownUsage = contextTokens !== null && contextPercent !== null;
+    const approximate = ctx.contextApproximate ? "~" : "";
+    // "full" (default): tokens/window + one-decimal percentage + auto-compact icon.
+    // "percent": bare rounded percentage, threshold-colored, no icons.
+    const text = percentOnly
+      ? (hasKnownUsage ? `${approximate}${Math.round(contextPercent)}%` : "?")
+      : hasKnownUsage
+        ? `${approximate}${formatTokens(contextTokens)}/${formatTokens(contextWindow)} (${contextPercent.toFixed(1)}%)${autoIcon}`
+        : `?/${formatTokens(contextWindow)}${autoIcon}`;
 
     // Icon outside color, text inside - use semantic colors for thresholds
     let content: string;
-    if (pct > 90) {
-      content = withIcon(icons.context, color(ctx, "contextError", text));
-    } else if (pct > 70) {
-      content = withIcon(icons.context, color(ctx, "contextWarn", text));
+    const colored = (semantic: "context" | "contextWarn" | "contextError") =>
+      percentOnly ? color(ctx, semantic, text) : withIcon(icons.context, color(ctx, semantic, text));
+    if (hasKnownUsage && contextPercent > 90) {
+      content = colored("contextError");
+    } else if (hasKnownUsage && contextPercent > 70) {
+      content = colored("contextWarn");
     } else {
-      content = withIcon(icons.context, color(ctx, "context", text));
+      content = colored("context");
     }
 
     return { content, visible: true };
@@ -436,7 +432,7 @@ const sessionSegment: StatusLineSegment = {
   render(ctx) {
     const icons = getIcons();
     const sessionId = ctx.sessionId;
-    const display = sessionId?.slice(0, 8) || "new";
+    const display = ctx.sessionName?.trim() ? ctx.sessionName : sessionId?.slice(0, 8) || "new";
 
     return { content: withIcon(icons.session, display), visible: true };
   },
@@ -446,19 +442,76 @@ const hostnameSegment: StatusLineSegment = {
   id: "hostname",
   render() {
     const icons = getIcons();
-    const name = sanitizeSegmentText(osHostname()).split(".")[0] || "host";
+    const name = osHostname().split(".")[0];
     return { content: withIcon(icons.host, name), visible: true };
   },
 };
 
+// Whole-percent hit rate over prompt tokens: cache reads / (uncached input + reads + writes).
+// Undefined when there are no prompt tokens.
+function hitRatePercent(tokens: RequestCacheUsage): number | undefined {
+  const prompt = tokens.input + tokens.cacheRead + tokens.cacheWrite;
+  return prompt > 0 ? Math.round((tokens.cacheRead / prompt) * 100) : undefined;
+}
+
+// Rate text for the segment, with "--" standing in for an unknown rate.
+function percentText(rate: number | undefined): string {
+  return rate === undefined ? "--" : `${rate}%`;
+}
+
+// Colors a hit rate by band: below 30% cacheHitError, below 70% cacheHitWarn, otherwise cacheHit.
+// Unknown rates use the tokens color so the placeholder reads as neutral.
+function colorHitRate(ctx: SegmentContext, rate: number | undefined, text: string): string {
+  if (rate === undefined) return color(ctx, "tokens", text);
+  if (rate < 30) return color(ctx, "cacheHitError", text);
+  if (rate < 70) return color(ctx, "cacheHitWarn", text);
+  return color(ctx, "cacheHit", text);
+}
+
+// "request" format: hit rate of the latest request, colored by band. Visible once any cache activity is recorded.
+function renderRequestCacheRead(ctx: SegmentContext): RenderedSegment {
+  const { cacheRead, cacheWrite } = ctx.usageStats;
+  if (!cacheRead && !cacheWrite) return { content: "", visible: false };
+
+  const icons = getIcons();
+  const rate = ctx.lastRequestCache ? hitRatePercent(ctx.lastRequestCache) : undefined;
+  const text = [icons.cache, percentText(rate)].filter(Boolean).join(" ");
+  return { content: colorHitRate(ctx, rate, text), visible: true };
+}
+
+// "session-request" format: whole-session hit rate, then the latest request's, each colored by its own band.
+function renderSessionRequestCacheRead(ctx: SegmentContext): RenderedSegment {
+  const { cacheRead, cacheWrite } = ctx.usageStats;
+  if (!cacheRead && !cacheWrite) return { content: "", visible: false };
+
+  const icons = getIcons();
+  const sessionRate = hitRatePercent(ctx.usageStats);
+  const requestRate = ctx.lastRequestCache ? hitRatePercent(ctx.lastRequestCache) : undefined;
+  const sessionText = colorHitRate(ctx, sessionRate, [icons.cache, percentText(sessionRate)].filter(Boolean).join(" "));
+  const requestText = colorHitRate(ctx, requestRate, `last ${percentText(requestRate)}`);
+  return { content: `${sessionText}${SEP_DOT}${requestText}`, visible: true };
+}
+
 const cacheReadSegment: StatusLineSegment = {
   id: "cache_read",
   render(ctx) {
+    const format = ctx.options.cache_read?.format ?? "tokens";
+    if (format === "request") return renderRequestCacheRead(ctx);
+    if (format === "session-request") return renderSessionRequestCacheRead(ctx);
+
     const icons = getIcons();
     const { cacheRead } = ctx.usageStats;
-    if (!cacheRead && !ctx.alwaysShowTokens) return { content: "", visible: false };
+    if (!cacheRead) return { content: "", visible: false };
 
-    const content = withIcon(icons.cache, formatTokens(cacheRead));
+    const hitRate = hitRatePercent(ctx.usageStats) ?? 0;
+
+    let content: string;
+    if (format === "percent") {
+      content = [icons.cache, `${hitRate}%`].filter(Boolean).join(" ");
+    } else {
+      const tokens = [icons.cache, icons.input, formatTokens(cacheRead)].filter(Boolean).join(" ");
+      content = format === "both" ? `${tokens} (${hitRate}%)` : tokens;
+    }
     return { content: color(ctx, "tokens", content), visible: true };
   },
 };
@@ -468,9 +521,10 @@ const cacheWriteSegment: StatusLineSegment = {
   render(ctx) {
     const icons = getIcons();
     const { cacheWrite } = ctx.usageStats;
-    if (!cacheWrite && !ctx.alwaysShowTokens) return { content: "", visible: false };
+    if (!cacheWrite) return { content: "", visible: false };
 
-    const content = withIcon(icons.cache, formatTokens(cacheWrite));
+    const parts = [icons.cache, icons.output, formatTokens(cacheWrite)].filter(Boolean);
+    const content = parts.join(" ");
     return { content: color(ctx, "tokens", content), visible: true };
   },
 };
@@ -496,8 +550,8 @@ const extensionStatusesSegment: StatusLineSegment = {
 
     if (parts.length === 0) return { content: "", visible: false };
 
-    // Statuses already have their own styling applied by the extensions
-    const content = parts.join(` ${SEP_DOT} `);
+    // Normalization strips trailing SGR resets; isolate each status's styling.
+    const content = parts.map((part) => `\x1b[0m${part}\x1b[0m`).join(SEP_DOT);
     return { content, visible: true };
   },
 };
@@ -513,6 +567,7 @@ export const SEGMENTS: Record<BuiltinStatusLineSegmentId, StatusLineSegment> = {
   git: gitSegment,
   thinking: thinkingSegment,
   subagents: subagentsSegment,
+  queue: queueSegment,
   token_in: tokenInSegment,
   token_out: tokenOutSegment,
   token_total: tokenTotalSegment,
@@ -534,7 +589,7 @@ function renderCustomSegment(id: `custom:${string}`, ctx: SegmentContext): Rende
   if (!custom) return { content: "", visible: false };
 
   const rawStatus = ctx.extensionStatuses.get(custom.statusKey);
-  const normalizedStatus = rawStatus ? normalizeExtensionStatusValue(rawStatus) : null;
+  const normalizedStatus = rawStatus ? normalizeExtensionStatusValue(rawStatus, custom.selfColorize) : null;
   if (!normalizedStatus) {
     return custom.hideWhenMissing ? { content: "", visible: false } : { content: custom.prefix ?? custom.id, visible: true };
   }
@@ -543,15 +598,19 @@ function renderCustomSegment(id: `custom:${string}`, ctx: SegmentContext): Rende
   if (custom.prefix) {
     content = `${custom.prefix}${SEP_DOT}${content}`;
   }
-  if (custom.color) {
+  if (custom.color && !custom.selfColorize) {
     content = applyColor(ctx.theme, custom.color, content);
   }
 
   return { content, visible: true };
 }
 
+function isCustomSegmentId(id: StatusLineSegmentId): id is `custom:${string}` {
+  return id.startsWith("custom:");
+}
+
 export function renderSegment(id: StatusLineSegmentId, ctx: SegmentContext): RenderedSegment {
-  if (id.startsWith("custom:")) {
+  if (isCustomSegmentId(id)) {
     return renderCustomSegment(id, ctx);
   }
 

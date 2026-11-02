@@ -1,108 +1,48 @@
-import test from "node:test";
+import { test } from "node:test";
 import assert from "node:assert/strict";
-import {
-  ASCII_SEPARATORS,
-  NERD_SEPARATORS,
-  getSeparatorChars,
-  hasNerdFonts,
-  setNerdFontsPreference,
-} from "../icons.ts";
-import { parsePowerlineConfig } from "../powerline-config.ts";
+import { hasNerdFonts } from "../icons.ts";
 
-const PRESETS = ["default", "full", "custom"] as const;
-
-function withNerdFontsEnv(value: string | undefined, fn: () => void): void {
-  const original = process.env.POWERLINE_NERD_FONTS;
-  if (value === undefined) {
-    delete process.env.POWERLINE_NERD_FONTS;
-  } else {
-    process.env.POWERLINE_NERD_FONTS = value;
-  }
+test("hasNerdFonts uses TERM only when TERM_PROGRAM is unset and preserves overrides", () => {
+  const saved = { ...process.env };
   try {
-    fn();
+    delete process.env.TERM_PROGRAM;
+    delete process.env.POWERLINE_NERD_FONTS;
+    delete process.env.GHOSTTY_RESOURCES_DIR;
+
+    process.env.TERM = "xterm-kitty";
+    assert.equal(hasNerdFonts(), true, "kitty TERM=xterm-kitty should be detected");
+
+    process.env.TERM = "xterm-256color";
+    assert.equal(hasNerdFonts(), false, "plain xterm should not be detected");
+
+    process.env.TERM = "xterm-kitty";
+    process.env.TERM_PROGRAM = "vscode";
+    assert.equal(hasNerdFonts(), false, "TERM must not override a present TERM_PROGRAM");
+
+    process.env.TERM_PROGRAM = "";
+    assert.equal(hasNerdFonts(), false, "empty TERM_PROGRAM must not fall back to TERM");
+
+    process.env.TERM = "xterm-256color";
+    process.env.TERM_PROGRAM = "WezTerm";
+    assert.equal(hasNerdFonts(), true, "recognized TERM_PROGRAM remains case-insensitive");
+
+    process.env.TERM_PROGRAM = "Kaku";
+    assert.equal(hasNerdFonts(), true, "Kaku TERM_PROGRAM should be detected");
+
+    process.env.TERM_PROGRAM = "vscode";
+    process.env.POWERLINE_NERD_FONTS = "1";
+    assert.equal(hasNerdFonts(), true, "explicit enable overrides the terminal heuristic");
+
+    delete process.env.POWERLINE_NERD_FONTS;
+    process.env.GHOSTTY_RESOURCES_DIR = "/ghostty";
+    assert.equal(hasNerdFonts(), true, "Ghostty marker overrides the terminal heuristic");
+
+    process.env.POWERLINE_NERD_FONTS = "0";
+    assert.equal(hasNerdFonts(), false, "explicit disable overrides Ghostty");
   } finally {
-    if (original === undefined) {
-      delete process.env.POWERLINE_NERD_FONTS;
-    } else {
-      process.env.POWERLINE_NERD_FONTS = original;
+    for (const key of ["TERM", "TERM_PROGRAM", "POWERLINE_NERD_FONTS", "GHOSTTY_RESOURCES_DIR"]) {
+      if (key in saved) process.env[key] = saved[key];
+      else delete process.env[key];
     }
   }
-}
-
-function withNerdFontsConfig(value: boolean | null, fn: () => void): void {
-  try {
-    setNerdFontsPreference(value);
-    fn();
-  } finally {
-    setNerdFontsPreference(null);
-  }
-}
-
-test("hasNerdFonts defaults to true when the env var is unset", () => {
-  withNerdFontsEnv(undefined, () => {
-    assert.equal(hasNerdFonts(), true);
-  });
-});
-
-test("hasNerdFonts honors POWERLINE_NERD_FONTS=1", () => {
-  withNerdFontsEnv("1", () => {
-    assert.equal(hasNerdFonts(), true);
-  });
-});
-
-test("hasNerdFonts honors documented POWERLINE_NERD_FONTS=0 opt-out", () => {
-  withNerdFontsEnv("0", () => {
-    assert.equal(hasNerdFonts(), false);
-  });
-});
-
-test("getSeparatorChars selects the ASCII set when Nerd Fonts are disabled", () => {
-  withNerdFontsEnv("0", () => {
-    assert.deepEqual(getSeparatorChars(), ASCII_SEPARATORS);
-  });
-  withNerdFontsEnv("1", () => {
-    assert.deepEqual(getSeparatorChars(), NERD_SEPARATORS);
-  });
-});
-
-test("hasNerdFonts uses the config preference when the env var is unset", () => {
-  withNerdFontsEnv(undefined, () => {
-    withNerdFontsConfig(false, () => {
-      assert.equal(hasNerdFonts(), false);
-    });
-    withNerdFontsConfig(true, () => {
-      assert.equal(hasNerdFonts(), true);
-    });
-  });
-});
-
-test("hasNerdFonts falls back to the default when neither env nor config is set", () => {
-  withNerdFontsEnv(undefined, () => {
-    withNerdFontsConfig(null, () => {
-      assert.equal(hasNerdFonts(), true);
-    });
-  });
-});
-
-test("POWERLINE_NERD_FONTS env var overrides the config preference", () => {
-  // Env on beats config off.
-  withNerdFontsEnv("1", () => {
-    withNerdFontsConfig(false, () => {
-      assert.equal(hasNerdFonts(), true);
-    });
-  });
-  // Env off beats config on.
-  withNerdFontsEnv("0", () => {
-    withNerdFontsConfig(true, () => {
-      assert.equal(hasNerdFonts(), false);
-    });
-  });
-});
-
-test("parsePowerlineConfig reads the nerdFonts preference", () => {
-  assert.equal(parsePowerlineConfig({ nerdFonts: true }, PRESETS).nerdFonts, true);
-  assert.equal(parsePowerlineConfig({ nerdFonts: false }, PRESETS).nerdFonts, false);
-  // Unset or non-boolean leaves it null (fall back to env var, then default).
-  assert.equal(parsePowerlineConfig({}, PRESETS).nerdFonts, null);
-  assert.equal(parsePowerlineConfig({ nerdFonts: "yes" }, PRESETS).nerdFonts, null);
 });

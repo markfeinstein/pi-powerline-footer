@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { renderSegment } from "../segments.ts";
-import { getIcons } from "../icons.ts";
+import { rainbow } from "../theme.ts";
 import type { ColorScheme, SegmentContext, ThemeLike } from "../types.ts";
 
 function hexAnsi(hex: `#${string}`): string {
@@ -17,14 +17,15 @@ function createSegmentContext(thinkingLevel: string, colors: ColorScheme): Segme
     model: undefined,
     thinkingLevel,
     sessionId: undefined,
-    usageStats: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 },
+    usageStats: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, subagentCost: 0 },
+    contextTokens: 0,
     contextPercent: 0,
     contextWindow: 0,
+    contextApproximate: false,
     autoCompactEnabled: true,
     customCompactionEnabled: false,
     usingSubscription: false,
     sessionStartTime: Date.now(),
-    alwaysShowTokens: false,
     shellModeActive: false,
     shellRunning: false,
     shellName: null,
@@ -56,10 +57,36 @@ test("thinking segment uses per-level colors for off through medium", () => {
   const low = renderSegment("thinking", createSegmentContext("low", colors));
   const medium = renderSegment("thinking", createSegmentContext("medium", colors));
 
-  const ic = getIcons().thinking;
-  const tag = (t: string) => (ic ? `${ic} ${t}` : t);
-  assert.equal(off.content, `${hexAnsi("#111111")}${tag("off")}\x1b[0m`);
-  assert.equal(minimal.content, `${hexAnsi("#222222")}${tag("minimal")}\x1b[0m`);
-  assert.equal(low.content, `${hexAnsi("#333333")}${tag("low")}\x1b[0m`);
-  assert.equal(medium.content, `${hexAnsi("#444444")}${tag("medium")}\x1b[0m`);
+  assert.equal(off.content, `${hexAnsi("#111111")}think:off\x1b[0m`);
+  assert.equal(minimal.content, `${hexAnsi("#222222")}think:min\x1b[0m`);
+  assert.equal(low.content, `${hexAnsi("#333333")}think:low\x1b[0m`);
+  assert.equal(medium.content, `${hexAnsi("#444444")}think:med\x1b[0m`);
+});
+
+test("thinking segment uses rainbow styling for high through max by default", () => {
+  const colors: ColorScheme = { thinking: "#111111" };
+
+  for (const level of ["high", "xhigh", "max"]) {
+    const rendered = renderSegment("thinking", createSegmentContext(level, colors));
+    assert.deepEqual(rendered, {
+      content: rainbow(`think:${level}`),
+      visible: true,
+    });
+  }
+});
+
+test("thinking segment honors per-level colors for high through max", () => {
+  const colors: ColorScheme = {
+    thinkingHigh: "#111111",
+    thinkingXhigh: "#222222",
+    thinkingMax: "#333333",
+  };
+
+  const high = renderSegment("thinking", createSegmentContext("high", colors));
+  const xhigh = renderSegment("thinking", createSegmentContext("xhigh", colors));
+  const max = renderSegment("thinking", createSegmentContext("max", colors));
+
+  assert.equal(high.content, `${hexAnsi("#111111")}think:high\x1b[0m`);
+  assert.equal(xhigh.content, `${hexAnsi("#222222")}think:xhigh\x1b[0m`);
+  assert.equal(max.content, `${hexAnsi("#333333")}think:max\x1b[0m`);
 });

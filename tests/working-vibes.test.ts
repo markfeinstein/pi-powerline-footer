@@ -1,8 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, join } from "node:path";
+import { join } from "node:path";
+
+import { getVibeFileCount, initVibeManager, onVibeAgentEnd, onVibeAgentStart, onVibeBeforeAgentStart, parseVibeGenerateArgs, setVibeMode, setVibeModel, setVibeTheme, setVibeWorkingMessageColor, setVibeWorkingMessageTheme } from "../working-vibes.ts";
+import { rainbow } from "../theme.ts";
 
 const FAUX_PROVIDER_PATH = new URL("../node_modules/@earendil-works/pi-ai/dist/providers/faux.js", import.meta.url).href;
 
@@ -20,119 +23,83 @@ async function importFauxProviderTools() {
 
 function ensurePiModuleLinks(): { cleanup: () => void } {
   const nodeModulesDir = join(process.cwd(), "node_modules", "@earendil-works");
-  const requiredModules = ["pi-coding-agent", "pi-ai"];
-  const missing = requiredModules.filter((name) => !existsSync(join(nodeModulesDir, name)));
-  assert.deepEqual(
-    missing,
-    [],
-    `Missing test dependencies: ${missing.join(", ")}. Run npm ci before running working-vibes tests.`,
-  );
+  mkdirSync(nodeModulesDir, { recursive: true });
+  const links = [
+    {
+      link: join(nodeModulesDir, "pi-coding-agent"),
+      target: "/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent",
+    },
+    {
+      link: join(nodeModulesDir, "pi-ai"),
+      target: "/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-ai",
+    },
+  ];
 
-  return { cleanup() {} };
+  const createdLinks: string[] = [];
+  for (const { link, target } of links) {
+    if (!existsSync(link)) {
+      symlinkSync(target, link);
+      createdLinks.push(link);
+    }
+  }
+
+  return {
+    cleanup() {
+      for (const link of createdLinks.reverse()) {
+        if (existsSync(link)) {
+          rmSync(link, { recursive: true, force: true });
+        }
+      }
+    },
+  };
 }
 
-test("parseVibeGenerateArgs preserves multi-word themes with optional counts", async () => {
-  const { parseVibeGenerateArgs } = await import("../working-vibes.ts");
-
+test("parseVibeGenerateArgs supports multi-word themes", () => {
+  assert.deepEqual(parseVibeGenerateArgs(["pirate", "200"]), { theme: "pirate", count: 200 });
   assert.deepEqual(parseVibeGenerateArgs(["star", "trek", "200"]), { theme: "star trek", count: 200 });
   assert.deepEqual(parseVibeGenerateArgs(["star", "trek"]), { theme: "star trek", count: 100 });
-  assert.deepEqual(parseVibeGenerateArgs(["mafia", "9999"]), { theme: "mafia", count: 500 });
-  assert.deepEqual(parseVibeGenerateArgs(["2049"]), { theme: "2049", count: 100 });
-  assert.deepEqual(parseVibeGenerateArgs(["lofi", "3abc"]), { theme: "lofi 3abc", count: 100 });
+  assert.deepEqual(parseVibeGenerateArgs(["star", "trek", "abc"]), { theme: "star trek abc", count: 100 });
+  assert.deepEqual(parseVibeGenerateArgs(["lord", "of", "rings", "999"]), { theme: "lord of rings", count: 500 });
   assert.equal(parseVibeGenerateArgs([]), null);
 });
 
-test("oversized vibe files are ignored", async () => {
+
+test("working-vibe color styles semantic, hex, and rainbow messages", () => {
   const home = mkdtempSync(join(tmpdir(), "powerline-vibes-home-"));
   const previousHome = process.env.HOME;
   process.env.HOME = home;
 
   try {
-    const { getVibeFileCount } = await import("../working-vibes.ts");
-    const vibesDir = join(home, ".pi", "agent", "vibes");
-    mkdirSync(vibesDir, { recursive: true });
-    writeFileSync(join(vibesDir, "huge.txt"), `${"Loading...\n".repeat(14000)}`);
-
-    assert.equal(getVibeFileCount("huge"), 0);
-  } finally {
-    process.env.HOME = previousHome;
-  }
-});
-
-test("file-mode vibes strip terminal controls before display", async () => {
-  const home = mkdtempSync(join(tmpdir(), "powerline-vibes-home-"));
-  const previousHome = process.env.HOME;
-  process.env.HOME = home;
-
-  try {
-    const { initVibeManager, onVibeBeforeAgentStart, setVibeMode, setVibeTheme } = await import("../working-vibes.ts");
-    const vibesDir = join(home, ".pi", "agent", "vibes");
-    mkdirSync(vibesDir, { recursive: true });
-    writeFileSync(join(vibesDir, "noir.txt"), "\x1b]52;c;secret\x07Shadow\x1b[31m walking...\n");
-
-    initVibeManager({ modelRegistry: {} } as never);
-    assert.equal(setVibeTheme("noir"), true);
-    assert.equal(setVibeMode("file"), true);
-
-    const updates: Array<string | undefined> = [];
-    onVibeBeforeAgentStart("investigate", (message) => updates.push(message));
-
-    assert.deepEqual(updates, ["Channeling noir...", "Shadow walking..."]);
-  } finally {
-    if (previousHome === undefined) {
-      delete process.env.HOME;
-    } else {
-      process.env.HOME = previousHome;
-    }
-    rmSync(home, { recursive: true, force: true });
-  }
-});
-
-test("working vibe applies generated text when generation resolves before agent_start", async () => {
-  const home = mkdtempSync(join(tmpdir(), "powerline-vibes-home-"));
-  const previousHome = process.env.HOME;
-  process.env.HOME = home;
-
-  try {
-    const { initVibeManager, onVibeAgentStart, onVibeBeforeAgentStart, setVibeModel, setVibeTheme } = await import("../working-vibes.ts");
-    initVibeManager({ modelRegistry: {} } as never);
-    assert.equal(setVibeTheme("noir"), true);
-    assert.equal(setVibeModel("invalid-model-spec"), true);
-
-    const updates: Array<string | undefined> = [];
-    onVibeBeforeAgentStart("investigate", (message) => updates.push(message));
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    onVibeAgentStart((message) => updates.push(message));
-
-    assert.deepEqual(updates, ["Channeling noir...", "Working..."]);
-  } finally {
-    if (previousHome === undefined) {
-      delete process.env.HOME;
-    } else {
-      process.env.HOME = previousHome;
-    }
-    rmSync(home, { recursive: true, force: true });
-  }
-});
-
-test("working vibe clears pre-start placeholder on agent end", async () => {
-  const home = mkdtempSync(join(tmpdir(), "powerline-vibes-home-"));
-  const previousHome = process.env.HOME;
-  process.env.HOME = home;
-
-  try {
-    const { initVibeManager, onVibeAgentEnd, onVibeAgentStart, onVibeBeforeAgentStart, setVibeModel, setVibeTheme } = await import("../working-vibes.ts");
-    initVibeManager({ modelRegistry: {} } as never);
-    assert.equal(setVibeTheme("noir"), true);
-    assert.equal(setVibeModel("invalid-model-spec"), true);
-
-    const updates: Array<string | undefined> = [];
-    onVibeBeforeAgentStart("investigate", (message) => updates.push(message));
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    initVibeManager({ modelRegistry: { find() { return undefined; } } } as any);
+    setVibeWorkingMessageTheme({
+      fg(color, text) {
+        return `<${color}>${text}</${color}>`;
+      },
+    });
+    setVibeTheme("star trek");
+    setVibeMode("file");
     onVibeAgentStart();
-    onVibeAgentEnd((message) => updates.push(message));
 
-    assert.deepEqual(updates, ["Channeling noir...", undefined]);
+    const semantic: Array<string | undefined> = [];
+    setVibeWorkingMessageColor("warning");
+    onVibeBeforeAgentStart("fix a bug", (message) => semantic.push(message));
+    assert.equal(semantic[0], "<warning>Channeling star trek...</warning>");
+
+    const hex: Array<string | undefined> = [];
+    setVibeWorkingMessageColor("#89d281");
+    onVibeBeforeAgentStart("fix a bug", (message) => hex.push(message));
+    assert.equal(hex[0], "\x1b[38;2;137;210;129mChanneling star trek...\x1b[0m");
+
+    const rainbowUpdates: Array<string | undefined> = [];
+    setVibeWorkingMessageColor("rainbow");
+    onVibeBeforeAgentStart("fix a bug", (message) => rainbowUpdates.push(message));
+    assert.equal(rainbowUpdates[0], rainbow("Channeling star trek..."));
+
+    const defaultUpdates: Array<string | undefined> = [];
+    setVibeWorkingMessageColor(undefined);
+    onVibeBeforeAgentStart("fix a bug", (message) => defaultUpdates.push(message));
+    assert.equal(defaultUpdates[0], "Channeling star trek...");
+    onVibeAgentEnd(() => {});
   } finally {
     if (previousHome === undefined) {
       delete process.env.HOME;
@@ -143,94 +110,50 @@ test("working vibe clears pre-start placeholder on agent end", async () => {
   }
 });
 
-test("working vibe retries a repeated message after callback failure", async () => {
+test("file vibes accept ellipsis suffixes, reject malformed entries, and use script-appropriate ellipses", () => {
   const home = mkdtempSync(join(tmpdir(), "powerline-vibes-home-"));
   const previousHome = process.env.HOME;
   process.env.HOME = home;
 
   try {
-    const { initVibeManager, onVibeAgentEnd, onVibeBeforeAgentStart, setVibeModel, setVibeTheme } = await import("../working-vibes.ts");
-    initVibeManager({ modelRegistry: {} } as never);
-    assert.equal(setVibeTheme("noir"), true);
-    assert.equal(setVibeModel("invalid-model-spec"), true);
-
-    const updates: Array<string | undefined> = [];
-    onVibeBeforeAgentStart("investigate", (message) => updates.push(message));
-    assert.deepEqual(updates, ["Channeling noir..."]);
-
-    assert.throws(() => onVibeAgentEnd(() => {
-      throw new Error("ui unavailable");
-    }), /ui unavailable/);
-    onVibeAgentEnd((message) => updates.push(message));
-
-    assert.deepEqual(updates, ["Channeling noir...", undefined]);
-  } finally {
-    if (previousHome === undefined) {
-      delete process.env.HOME;
-    } else {
-      process.env.HOME = previousHome;
-    }
-    rmSync(home, { recursive: true, force: true });
-  }
-});
-
-test("file-mode vibes restart their shuffle for each session", async () => {
-  const home = mkdtempSync(join(tmpdir(), "powerline-vibes-home-"));
-  const previousHome = process.env.HOME;
-  const originalDateNow = Date.now;
-  process.env.HOME = home;
-  Date.now = () => 12345;
-
-  try {
-    const { initVibeManager, onVibeBeforeAgentStart, setVibeMode, setVibeTheme } = await import("../working-vibes.ts");
     const vibesDir = join(home, ".pi", "agent", "vibes");
     mkdirSync(vibesDir, { recursive: true });
-    writeFileSync(join(vibesDir, "noir.txt"), "First...\nSecond...\nThird...\n");
+    writeFileSync(join(vibesDir, "scripts.txt"), [
+      "Still working...",
+      "扩展汉字𠀀...",
+      "ひらがな...",
+      "ｶﾀｶﾅ...",
+      "한글...",
+      "注音ㄅ...",
+      "Missing suffix",
+      "...",
+      "……",
+    ].join("\n"));
 
-    initVibeManager({ modelRegistry: {} } as never);
-    assert.equal(setVibeTheme("noir"), true);
-    assert.equal(setVibeMode("file"), true);
-    const firstSession: Array<string | undefined> = [];
-    onVibeBeforeAgentStart("investigate", (message) => firstSession.push(message));
+    initVibeManager({ modelRegistry: { find() { return undefined; } } } as any);
+    setVibeTheme("scripts");
+    setVibeMode("file");
+    assert.equal(getVibeFileCount("scripts"), 6);
 
-    initVibeManager({ modelRegistry: {} } as never);
-    const secondSession: Array<string | undefined> = [];
-    onVibeBeforeAgentStart("investigate", (message) => secondSession.push(message));
-
-    assert.equal(firstSession[0], "Channeling noir...");
-    assert.equal(secondSession[0], "Channeling noir...");
-    assert.equal(secondSession[1], firstSession[1]);
-  } finally {
-    Date.now = originalDateNow;
-    if (previousHome === undefined) {
-      delete process.env.HOME;
-    } else {
-      process.env.HOME = previousHome;
+    const messages: string[] = [];
+    for (let index = 0; index < 6; index++) {
+      onVibeBeforeAgentStart("test scripts", message => {
+        if (message) messages.push(message);
+      });
     }
-    rmSync(home, { recursive: true, force: true });
-  }
-});
-
-test("vibe model setting strips terminal controls before storage and display", async () => {
-  const home = mkdtempSync(join(tmpdir(), "powerline-vibes-home-"));
-  const previousHome = process.env.HOME;
-  process.env.HOME = home;
-
-  try {
-    const { getVibeModel, initVibeManager, setVibeModel } = await import("../working-vibes.ts");
-    initVibeManager({ modelRegistry: {} } as never);
-
-    assert.equal(setVibeModel("test-provider/test-model\x1b]52;c;secret\x07\x1b[31m"), true);
-    assert.equal(getVibeModel(), "test-provider/test-model");
-
-    const settings = JSON.parse(readFileSync(join(home, ".pi", "agent", "settings.json"), "utf-8"));
-    assert.equal(settings.workingVibeModel, "test-provider/test-model");
+    assert.deepEqual(new Set(messages), new Set([
+      "Channeling scripts...",
+      "Still working...",
+      "扩展汉字𠀀……",
+      "ひらがな……",
+      "ｶﾀｶﾅ……",
+      "한글……",
+      "注音ㄅ……",
+    ]));
   } finally {
-    if (previousHome === undefined) {
-      delete process.env.HOME;
-    } else {
-      process.env.HOME = previousHome;
-    }
+    onVibeAgentEnd(() => {});
+    if (previousHome === undefined) delete process.env.HOME;
+    else process.env.HOME = previousHome;
     rmSync(home, { recursive: true, force: true });
   }
 });
@@ -242,50 +165,53 @@ test("generateVibesBatch includes a system prompt so faux providers can return t
   process.env.HOME = home;
 
   try {
-    const { fauxAssistantMessage, registerFauxProvider } = await importFauxProviderTools();
+    const { fauxAssistantMessage, fauxProvider } = await importFauxProviderTools();
     const { generateVibesBatch, initVibeManager, setVibeModel } = await import("../working-vibes.ts");
 
-    const registration = registerFauxProvider({
+    const registration = fauxProvider({
       provider: "test-provider",
       models: [{ id: "test-model" }],
     });
 
-    try {
-      const model = registration.getModel("test-model");
-      assert.ok(model);
+    const model = registration.getModel("test-model");
+    assert.ok(model);
 
-      registration.setResponses([
-        (context) => {
-          assert.match(context.systemPrompt ?? "", /loading messages/i);
-          return fauxAssistantMessage("Engaging warp drive...\nRunning diagnostics...");
+    registration.setResponses([
+      (context) => {
+        assert.match(context.systemPrompt ?? "", /loading messages/i);
+        return fauxAssistantMessage("Engaging warp drive...\nRunning diagnostics...");
+      },
+    ]);
+
+    initVibeManager({
+      sessionManager: { getSessionId: () => "test-session" },
+      modelRegistry: {
+        find(provider: string, modelId: string) {
+          return provider === "test-provider" && modelId === "test-model" ? model : undefined;
         },
-      ]);
-
-      initVibeManager({
-        modelRegistry: {
-          find(provider: string, modelId: string) {
-            return provider === "test-provider" && modelId === "test-model" ? model : undefined;
-          },
-          async getApiKeyAndHeaders() {
-            return { ok: true, apiKey: "test-key", headers: {} };
-          },
+        async getApiKeyAndHeaders() {
+          return { ok: true, apiKey: "test-key", headers: {} };
         },
-      });
+        getProvider(provider: string) {
+          return provider === "test-provider" ? registration.provider : undefined;
+        },
+        async getProviderAuth() {
+          return undefined;
+        },
+      },
+    });
 
-      assert.equal(setVibeModel("test-provider/test-model"), true);
+    assert.equal(setVibeModel("test-provider/test-model"), true);
 
-      const result = await generateVibesBatch("star trek", 2);
+    const result = await generateVibesBatch("star trek", 2);
 
-      assert.equal(result.success, true);
-      assert.equal(result.count, 2);
-      assert.equal(existsSync(result.filePath), true);
-      assert.deepEqual(readFileSync(result.filePath, "utf8").trim().split("\n"), [
-        "Engaging warp drive...",
-        "Running diagnostics...",
-      ]);
-    } finally {
-      registration.unregister();
-    }
+    assert.equal(result.success, true);
+    assert.equal(result.count, 2);
+    assert.equal(existsSync(result.filePath), true);
+    assert.deepEqual(readFileSync(result.filePath, "utf8").trim().split("\n"), [
+      "Engaging warp drive...",
+      "Running diagnostics...",
+    ]);
   } finally {
     if (previousHome === undefined) {
       delete process.env.HOME;
@@ -297,53 +223,59 @@ test("generateVibesBatch includes a system prompt so faux providers can return t
   }
 });
 
-test("generateVibesBatch caps model output to the requested count", async () => {
+test("generateVibesBatch forwards resolved provider env, credential base URL, and session ID", async () => {
   const links = ensurePiModuleLinks();
   const home = mkdtempSync(join(tmpdir(), "powerline-vibes-home-"));
   const previousHome = process.env.HOME;
   process.env.HOME = home;
 
   try {
-    const { fauxAssistantMessage, registerFauxProvider } = await importFauxProviderTools();
+    const { fauxAssistantMessage, fauxProvider } = await importFauxProviderTools();
     const { generateVibesBatch, initVibeManager, setVibeModel } = await import("../working-vibes.ts");
 
-    const registration = registerFauxProvider({
+    const registration = fauxProvider({
       provider: "test-provider",
       models: [{ id: "test-model" }],
     });
 
-    try {
-      const model = registration.getModel("test-model");
-      assert.ok(model);
+    const model = registration.getModel("test-model");
+    assert.ok(model);
 
-      registration.setResponses([
-        fauxAssistantMessage("First signal...\nSecond signal...\nThird signal..."),
-      ]);
+    registration.setResponses([
+      (_context, options, _state, requestModel) => {
+        assert.deepEqual(options?.env, { AWS_PROFILE: "vibes" });
+        assert.equal(options?.sessionId, "vibe-session");
+        assert.equal(requestModel.baseUrl, "https://credential.example/v1");
+        return fauxAssistantMessage("Signing the request...");
+      },
+    ]);
 
-      initVibeManager({
-        modelRegistry: {
-          find(provider: string, modelId: string) {
-            return provider === "test-provider" && modelId === "test-model" ? model : undefined;
-          },
-          async getApiKeyAndHeaders() {
-            return { ok: true, apiKey: "test-key", headers: {} };
-          },
+    initVibeManager({
+      sessionManager: { getSessionId: () => "vibe-session" },
+      modelRegistry: {
+        find(provider: string, modelId: string) {
+          return provider === "test-provider" && modelId === "test-model" ? model : undefined;
         },
-      });
+        async getApiKeyAndHeaders() {
+          return { ok: true, apiKey: "test-key", headers: {}, env: { AWS_PROFILE: "vibes" } };
+        },
+        getProvider(provider: string) {
+          return provider === "test-provider" ? registration.provider : undefined;
+        },
+        async getProviderAuth() {
+          return { auth: { apiKey: "test-key", baseUrl: "https://credential.example/v1" } };
+        },
+      },
+    });
 
-      assert.equal(setVibeModel("test-provider/test-model"), true);
+    assert.equal(setVibeModel("test-provider/test-model"), true);
 
-      const result = await generateVibesBatch("star trek", 2);
+    const result = await generateVibesBatch("bedrock", 1);
 
-      assert.equal(result.success, true);
-      assert.equal(result.count, 2);
-      assert.deepEqual(readFileSync(result.filePath, "utf8").trim().split("\n"), [
-        "First signal...",
-        "Second signal...",
-      ]);
-    } finally {
-      registration.unregister();
-    }
+    assert.equal(result.success, true);
+    assert.deepEqual(readFileSync(result.filePath, "utf8").trim().split("\n"), [
+      "Signing the request...",
+    ]);
   } finally {
     if (previousHome === undefined) {
       delete process.env.HOME;
@@ -355,344 +287,73 @@ test("generateVibesBatch caps model output to the requested count", async () => 
   }
 });
 
-test("on-demand vibe generation strips terminal controls before display", async () => {
+test("generateVibesBatch parses thinking suffix separately from model id", async () => {
   const links = ensurePiModuleLinks();
   const home = mkdtempSync(join(tmpdir(), "powerline-vibes-home-"));
   const previousHome = process.env.HOME;
   process.env.HOME = home;
 
   try {
-    const { fauxAssistantMessage, registerFauxProvider } = await importFauxProviderTools();
-    const { initVibeManager, onVibeAgentStart, onVibeBeforeAgentStart, setVibeModel, setVibeTheme } = await import("../working-vibes.ts");
-
-    const registration = registerFauxProvider({
-      provider: "test-provider",
-      models: [{ id: "test-model" }],
-    });
-
-    try {
-      const model = registration.getModel("test-model");
-      assert.ok(model);
-
-      registration.setResponses([
-        (context) => {
-          assert.match(context.systemPrompt ?? "", /loading messages/i);
-          return fauxAssistantMessage("\x1b]52;c;secret\x07Engaging \x1b[31mwarp drive...");
-        },
-      ]);
-
-      initVibeManager({
-        modelRegistry: {
-          find(provider: string, modelId: string) {
-            return provider === "test-provider" && modelId === "test-model" ? model : undefined;
-          },
-          async getApiKeyAndHeaders() {
-            return { ok: true, apiKey: "test-key", headers: {} };
-          },
-        },
-      });
-
-      assert.equal(setVibeTheme("star trek"), true);
-      assert.equal(setVibeModel("test-provider/test-model"), true);
-
-      const updates: Array<string | undefined> = [];
-      onVibeAgentStart();
-      onVibeBeforeAgentStart("fix a bug", (message) => {
-        updates.push(message);
-      });
-
-      const start = Date.now();
-      while (!updates.includes("Engaging warp drive...") && Date.now() - start < 1000) {
-        await new Promise((resolve) => setTimeout(resolve, 10));
-      }
-
-      assert.equal(updates[0], "Channeling star trek...");
-      assert.ok(updates.includes("Engaging warp drive..."));
-      assert.equal(updates.some((message) => message?.includes("\x1b")), false);
-    } finally {
-      registration.unregister();
-    }
-  } finally {
-    if (previousHome === undefined) {
-      delete process.env.HOME;
-    } else {
-      process.env.HOME = previousHome;
-    }
-    rmSync(home, { recursive: true, force: true });
-    links.cleanup();
-  }
-});
-
-test("on-demand vibe truncation does not split surrogate pairs", async () => {
-  const links = ensurePiModuleLinks();
-  const home = mkdtempSync(join(tmpdir(), "powerline-vibes-home-"));
-  const previousHome = process.env.HOME;
-  process.env.HOME = home;
-  mkdirSync(join(home, ".pi", "agent"), { recursive: true });
-  writeFileSync(join(home, ".pi", "agent", "settings.json"), JSON.stringify({ workingVibeMaxLength: 8 }) + "\n");
-
-  try {
-    const { fauxAssistantMessage, registerFauxProvider } = await importFauxProviderTools();
-    const { initVibeManager, onVibeAgentStart, onVibeBeforeAgentStart, setVibeModel, setVibeTheme } = await import("../working-vibes.ts");
-
-    const registration = registerFauxProvider({
-      provider: "test-provider",
-      models: [{ id: "test-model" }],
-    });
-
-    try {
-      const model = registration.getModel("test-model");
-      assert.ok(model);
-      registration.setResponses([() => fauxAssistantMessage("🚀🚀🚀🚀🚀🚀")]);
-
-      initVibeManager({
-        modelRegistry: {
-          find(provider: string, modelId: string) {
-            return provider === "test-provider" && modelId === "test-model" ? model : undefined;
-          },
-          async getApiKeyAndHeaders() {
-            return { ok: true, apiKey: "test-key", headers: {} };
-          },
-        },
-      });
-
-      assert.equal(setVibeTheme("space"), true);
-      assert.equal(setVibeModel("test-provider/test-model"), true);
-
-      const updates: Array<string | undefined> = [];
-      onVibeAgentStart();
-      onVibeBeforeAgentStart("launch", (message) => updates.push(message));
-
-      const start = Date.now();
-      while (!updates.some((message) => message !== "Channeling space..." && message?.endsWith("...")) && Date.now() - start < 1000) {
-        await new Promise((resolve) => setTimeout(resolve, 10));
-      }
-
-      const generated = updates.find((message) => message !== "Channeling space...");
-      assert.equal(generated, "🚀🚀🚀🚀🚀...");
-      assert.doesNotMatch(generated ?? "", /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/u);
-    } finally {
-      registration.unregister();
-    }
-  } finally {
-    if (previousHome === undefined) {
-      delete process.env.HOME;
-    } else {
-      process.env.HOME = previousHome;
-    }
-    rmSync(home, { recursive: true, force: true });
-    links.cleanup();
-  }
-});
-
-test("on-demand vibe generation redacts prompt secrets before model calls", async () => {
-  const links = ensurePiModuleLinks();
-  const home = mkdtempSync(join(tmpdir(), "powerline-vibes-home-"));
-  const previousHome = process.env.HOME;
-  process.env.HOME = home;
-
-  try {
-    const { fauxAssistantMessage, registerFauxProvider } = await importFauxProviderTools();
-    const { initVibeManager, onVibeAgentStart, onVibeBeforeAgentStart, setVibeModel, setVibeTheme } = await import("../working-vibes.ts");
-
-    const registration = registerFauxProvider({
-      provider: "test-provider",
-      models: [{ id: "test-model" }],
-    });
-
-    try {
-      const model = registration.getModel("test-model");
-      assert.ok(model);
-      let observedPrompt = "";
-
-      registration.setResponses([
-        (context) => {
-          const message = context.messages[0]?.content[0];
-          observedPrompt = message?.type === "text" ? message.text : "";
-          return fauxAssistantMessage("Safe diagnostics...");
-        },
-      ]);
-
-      initVibeManager({
-        modelRegistry: {
-          find(provider: string, modelId: string) {
-            return provider === "test-provider" && modelId === "test-model" ? model : undefined;
-          },
-          async getApiKeyAndHeaders() {
-            return { ok: true, apiKey: "test-key", headers: {} };
-          },
-        },
-      });
-
-      assert.equal(setVibeTheme("noir"), true);
-      assert.equal(setVibeModel("test-provider/test-model"), true);
-
-      const updates: Array<string | undefined> = [];
-      onVibeAgentStart();
-      onVibeBeforeAgentStart("deploy TOKEN=super-secret Authorization: Basic dXNlcjpwYXNz, next Authorization: Token abc123", (message) => updates.push(message));
-
-      const start = Date.now();
-      while (!updates.includes("Safe diagnostics...") && Date.now() - start < 1000) {
-        await new Promise((resolve) => setTimeout(resolve, 10));
-      }
-
-      assert.ok(updates.includes("Safe diagnostics..."));
-      assert.doesNotMatch(observedPrompt, /super-secret|dXNlcjpwYXNz|abc123/);
-      assert.match(observedPrompt, /TOKEN=\[redacted\]/);
-      assert.match(observedPrompt, /Authorization: \[redacted\]/i);
-    } finally {
-      registration.unregister();
-    }
-  } finally {
-    if (previousHome === undefined) {
-      delete process.env.HOME;
-    } else {
-      process.env.HOME = previousHome;
-    }
-    rmSync(home, { recursive: true, force: true });
-    links.cleanup();
-  }
-});
-
-test("tool-call vibe generation redacts authorization values", async () => {
-  const links = ensurePiModuleLinks();
-  const home = mkdtempSync(join(tmpdir(), "powerline-vibes-home-"));
-  const previousHome = process.env.HOME;
-  process.env.HOME = home;
-  mkdirSync(join(home, ".pi", "agent"), { recursive: true });
-  writeFileSync(join(home, ".pi", "agent", "settings.json"), JSON.stringify({ workingVibeRefreshInterval: 0 }) + "\n");
-
-  try {
-    const { fauxAssistantMessage, registerFauxProvider } = await importFauxProviderTools();
-    const { initVibeManager, onVibeAgentStart, onVibeToolCall, setVibeModel, setVibeTheme } = await import("../working-vibes.ts");
-
-    const registration = registerFauxProvider({
-      provider: "test-provider",
-      models: [{ id: "test-model" }],
-    });
-
-    try {
-      const model = registration.getModel("test-model");
-      assert.ok(model);
-      let observedPrompt = "";
-      registration.setResponses([
-        (context) => {
-          const message = context.messages[0]?.content[0];
-          observedPrompt = message?.type === "text" ? message.text : "";
-          return fauxAssistantMessage("Tool safe...");
-        },
-      ]);
-
-      initVibeManager({
-        modelRegistry: {
-          find(provider: string, modelId: string) {
-            return provider === "test-provider" && modelId === "test-model" ? model : undefined;
-          },
-          async getApiKeyAndHeaders() {
-            return { ok: true, apiKey: "test-key", headers: {} };
-          },
-        },
-      });
-      assert.equal(setVibeTheme("noir"), true);
-      assert.equal(setVibeModel("test-provider/test-model"), true);
-
-      const updates: Array<string | undefined> = [];
-      onVibeAgentStart();
-      onVibeToolCall("bash", { command: "curl -H 'authorization=token abc123' https://example.test" }, (message) => updates.push(message));
-
-      const start = Date.now();
-      while (!updates.includes("Tool safe...") && Date.now() - start < 1000) {
-        await new Promise((resolve) => setTimeout(resolve, 10));
-      }
-
-      assert.ok(updates.includes("Tool safe..."));
-      assert.doesNotMatch(observedPrompt, /abc123/);
-      assert.match(observedPrompt, /authorization=\[redacted\]/i);
-    } finally {
-      registration.unregister();
-    }
-  } finally {
-    if (previousHome === undefined) {
-      delete process.env.HOME;
-    } else {
-      process.env.HOME = previousHome;
-    }
-    rmSync(home, { recursive: true, force: true });
-    links.cleanup();
-  }
-});
-
-test("hasVibeFile requires at least one usable vibe", async () => {
-  const home = mkdtempSync(join(tmpdir(), "powerline-vibes-home-"));
-  const previousHome = process.env.HOME;
-  process.env.HOME = home;
-
-  try {
-    const { hasVibeFile } = await import("../working-vibes.ts");
-    const vibesDir = join(home, ".pi", "agent", "vibes");
-    mkdirSync(vibesDir, { recursive: true });
-    writeFileSync(join(vibesDir, "noir.txt"), "missing ellipsis\n\n");
-
-    assert.equal(hasVibeFile("noir"), false);
-
-    writeFileSync(join(vibesDir, "noir.txt"), "Shadow walking...\n");
-    assert.equal(hasVibeFile("noir"), true);
-  } finally {
-    if (previousHome === undefined) {
-      delete process.env.HOME;
-    } else {
-      process.env.HOME = previousHome;
-    }
-    rmSync(home, { recursive: true, force: true });
-  }
-});
-
-test("non-ascii vibe themes generate distinct file paths", async () => {
-  const links = ensurePiModuleLinks();
-  const home = mkdtempSync(join(tmpdir(), "powerline-vibes-home-"));
-  const previousHome = process.env.HOME;
-  process.env.HOME = home;
-
-  try {
-    const { fauxAssistantMessage, registerFauxProvider } = await importFauxProviderTools();
+    const { fauxAssistantMessage, fauxProvider } = await importFauxProviderTools();
     const { generateVibesBatch, initVibeManager, setVibeModel } = await import("../working-vibes.ts");
 
-    const registration = registerFauxProvider({
+    const registration = fauxProvider({
       provider: "test-provider",
-      models: [{ id: "test-model" }],
+      models: [{ id: "test-model" }, { id: "literal-model:low" }],
     });
 
-    try {
-      const model = registration.getModel("test-model");
-      assert.ok(model);
-      registration.setResponses([
-        fauxAssistantMessage("First signal..."),
-        fauxAssistantMessage("Second signal..."),
-      ]);
+    const model = registration.getModel("test-model");
+    const literalModel = registration.getModel("literal-model:low");
+    assert.ok(model);
+    assert.ok(literalModel);
 
-      initVibeManager({
-        modelRegistry: {
-          find(provider: string, modelId: string) {
-            return provider === "test-provider" && modelId === "test-model" ? model : undefined;
-          },
-          async getApiKeyAndHeaders() {
-            return { ok: true, apiKey: "test-key", headers: {} };
-          },
+    registration.setResponses([
+      (_context, options) => {
+        assert.equal(options?.reasoning, "low");
+        return fauxAssistantMessage("Quietly calculating...");
+      },
+      (_context, options) => {
+        assert.equal(options?.reasoning, undefined);
+        return fauxAssistantMessage("Literal model selected...");
+      },
+    ]);
+
+    initVibeManager({
+      sessionManager: { getSessionId: () => "test-session" },
+      modelRegistry: {
+        find(provider: string, modelId: string) {
+          if (provider !== "test-provider") return undefined;
+          if (modelId === "test-model") return model;
+          if (modelId === "literal-model:low") return literalModel;
+          return undefined;
         },
-      });
-      assert.equal(setVibeModel("test-provider/test-model"), true);
+        async getApiKeyAndHeaders() {
+          return { ok: true, apiKey: "test-key", headers: {} };
+        },
+        getProvider(provider: string) {
+          return provider === "test-provider" ? registration.provider : undefined;
+        },
+        async getProviderAuth() {
+          return undefined;
+        },
+      },
+    });
 
-      const tokyo = await generateVibesBatch("東京", 1);
-      const rocket = await generateVibesBatch("🚀", 1);
+    assert.equal(setVibeModel("test-provider/test-model:low"), true);
 
-      assert.equal(tokyo.success, true);
-      assert.equal(rocket.success, true);
-      assert.notEqual(tokyo.filePath, rocket.filePath);
-      assert.notEqual(basename(tokyo.filePath), "theme.txt");
-      assert.notEqual(basename(rocket.filePath), "theme.txt");
-    } finally {
-      registration.unregister();
-    }
+    const result = await generateVibesBatch("math", 1);
+
+    assert.equal(result.success, true);
+    assert.deepEqual(readFileSync(result.filePath, "utf8").trim().split("\n"), [
+      "Quietly calculating...",
+    ]);
+
+    assert.equal(setVibeModel("test-provider/literal-model:low"), true);
+    const literalResult = await generateVibesBatch("math", 1);
+    assert.equal(literalResult.success, true);
+    assert.deepEqual(readFileSync(literalResult.filePath, "utf8").trim().split("\n"), [
+      "Literal model selected...",
+    ]);
   } finally {
     if (previousHome === undefined) {
       delete process.env.HOME;
@@ -701,6 +362,193 @@ test("non-ascii vibe themes generate distinct file paths", async () => {
     }
     rmSync(home, { recursive: true, force: true });
     links.cleanup();
+  }
+});
+
+test("auto model spec follows the session's active model at generation time", async () => {
+  const links = ensurePiModuleLinks();
+  const home = mkdtempSync(join(tmpdir(), "powerline-vibes-home-"));
+  const previousHome = process.env.HOME;
+  process.env.HOME = home;
+
+  try {
+    const { fauxAssistantMessage, fauxProvider } = await importFauxProviderTools();
+    const { generateVibesBatch, initVibeManager, setVibeModel } = await import("../working-vibes.ts");
+
+    const registration = fauxProvider({
+      provider: "session-provider",
+      models: [{ id: "session-model" }, { id: "switched-model" }],
+    });
+    const first = registration.getModel("session-model");
+    const second = registration.getModel("switched-model");
+    assert.ok(first && second);
+
+    const requestedModels: string[] = [];
+    const respond = (_context: unknown, _options: unknown, _state: unknown, requestModel: { id: string }) => {
+      requestedModels.push(requestModel.id);
+      return fauxAssistantMessage("Following the active way...");
+    };
+    registration.setResponses([respond, respond]);
+
+    let activeModel: typeof first | undefined = first;
+    initVibeManager({
+      get model() {
+        return activeModel;
+      },
+      sessionManager: { getSessionId: () => "auto-session" },
+      modelRegistry: {
+        find: () => undefined,
+        async getApiKeyAndHeaders() {
+          return { ok: true, apiKey: "test-key", headers: {} };
+        },
+        getProvider(provider: string) {
+          return provider === "session-provider" ? registration.provider : undefined;
+        },
+        async getProviderAuth() {
+          return { auth: { apiKey: "test-key" } };
+        },
+      },
+    });
+
+    assert.equal(setVibeModel("Auto"), true);
+
+    assert.equal((await generateVibesBatch("auto-first", 1)).success, true);
+    activeModel = second;
+    assert.equal((await generateVibesBatch("auto-switched", 1)).success, true);
+    assert.deepEqual(requestedModels, ["session-model", "switched-model"]);
+
+    activeModel = undefined;
+    const none = await generateVibesBatch("auto-none", 1);
+    assert.ok(!none.success && /Model not found/.test(none.error));
+
+    // Restore the default spec so later tests are unaffected
+    assert.equal(setVibeModel("openai-codex/gpt-5.6-luna:low"), true);
+  } finally {
+    if (previousHome === undefined) {
+      delete process.env.HOME;
+    } else {
+      process.env.HOME = previousHome;
+    }
+    rmSync(home, { recursive: true, force: true });
+    links.cleanup();
+  }
+});
+
+test("on-demand vibe generation includes a system prompt for providers that require instructions", async () => {
+  const links = ensurePiModuleLinks();
+  const home = mkdtempSync(join(tmpdir(), "powerline-vibes-home-"));
+  const previousHome = process.env.HOME;
+  process.env.HOME = home;
+
+  try {
+    const { fauxAssistantMessage, fauxProvider } = await importFauxProviderTools();
+    const { initVibeManager, onVibeAgentStart, onVibeBeforeAgentStart, setVibeModel, setVibeTheme } = await import("../working-vibes.ts");
+
+    const registration = fauxProvider({
+      provider: "test-provider",
+      models: [{ id: "test-model" }],
+    });
+
+    const model = registration.getModel("test-model");
+    assert.ok(model);
+
+    registration.setResponses([
+      (context) => {
+        assert.match(context.systemPrompt ?? "", /loading messages/i);
+        return fauxAssistantMessage("Engaging warp drive...");
+      },
+    ]);
+
+    initVibeManager({
+      sessionManager: { getSessionId: () => "test-session" },
+      modelRegistry: {
+        find(provider: string, modelId: string) {
+          return provider === "test-provider" && modelId === "test-model" ? model : undefined;
+        },
+        async getApiKeyAndHeaders() {
+          return { ok: true, apiKey: "test-key", headers: {} };
+        },
+        getProvider(provider: string) {
+          return provider === "test-provider" ? registration.provider : undefined;
+        },
+        async getProviderAuth() {
+          return undefined;
+        },
+      },
+    });
+
+    assert.equal(setVibeTheme("star trek"), true);
+    assert.equal(setVibeModel("test-provider/test-model"), true);
+
+    const updates: Array<string | undefined> = [];
+    onVibeAgentStart();
+    onVibeBeforeAgentStart("fix a bug", (message) => {
+      updates.push(message);
+    });
+
+    const start = Date.now();
+    while (!updates.includes("Engaging warp drive...") && Date.now() - start < 1000) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+
+    assert.equal(updates[0], "Channeling star trek...");
+    assert.ok(updates.includes("Engaging warp drive..."));
+  } finally {
+    if (previousHome === undefined) {
+      delete process.env.HOME;
+    } else {
+      process.env.HOME = previousHome;
+    }
+    rmSync(home, { recursive: true, force: true });
+    links.cleanup();
+  }
+});
+
+test("on-demand vibe generation silently ignores stale contexts but logs unrelated failures", async () => {
+  const home = mkdtempSync(join(tmpdir(), "powerline-vibes-home-"));
+  const previousHome = process.env.HOME;
+  const originalDebug = console.debug;
+  process.env.HOME = home;
+
+  try {
+    assert.equal(setVibeTheme("star trek"), true);
+    assert.equal(setVibeMode("generate"), true);
+    assert.equal(setVibeModel("test-provider/test-model"), true);
+
+    const runFailure = async (failure: Error) => {
+      const logs: unknown[][] = [];
+      const updates: Array<string | undefined> = [];
+      console.debug = (...args: unknown[]) => logs.push(args);
+      initVibeManager({
+        modelRegistry: {
+          find() {
+            throw failure;
+          },
+        },
+      } as any);
+      onVibeAgentStart();
+      onVibeBeforeAgentStart("fix a bug", (message) => updates.push(message));
+      await new Promise((resolve) => setImmediate(resolve));
+      onVibeAgentEnd(() => {});
+      return { logs, updates };
+    };
+
+    const stale = await runFailure(new Error("This extension ctx is stale after session replacement or reload."));
+    assert.deepEqual(stale.updates, ["Channeling star trek..."]);
+    assert.deepEqual(stale.logs, []);
+
+    const unrelatedError = new Error("registry unavailable");
+    const unrelated = await runFailure(unrelatedError);
+    assert.deepEqual(unrelated.updates, ["Channeling star trek..."]);
+    assert.deepEqual(unrelated.logs, [["[working-vibes] Generation failed:", unrelatedError]]);
+  } finally {
+    console.debug = originalDebug;
+    if (previousHome === undefined) {
+      delete process.env.HOME;
+    } else {
+      process.env.HOME = previousHome;
+    }
+    rmSync(home, { recursive: true, force: true });
   }
 });
 
@@ -711,291 +559,48 @@ test("generateVibesBatch preserves provider errors instead of reporting an empty
   process.env.HOME = home;
 
   try {
-    const { fauxAssistantMessage, registerFauxProvider } = await importFauxProviderTools();
+    const { fauxAssistantMessage, fauxProvider } = await importFauxProviderTools();
     const { generateVibesBatch, initVibeManager, setVibeModel } = await import("../working-vibes.ts");
 
-    const registration = registerFauxProvider({
+    const registration = fauxProvider({
       provider: "test-provider",
       models: [{ id: "test-model" }],
     });
 
-    try {
-      const model = registration.getModel("test-model");
-      assert.ok(model);
+    const model = registration.getModel("test-model");
+    assert.ok(model);
 
-      registration.setResponses([
-        fauxAssistantMessage([], {
-          stopReason: "error",
-          errorMessage: "Instructions are required",
-        }),
-      ]);
+    registration.setResponses([
+      fauxAssistantMessage([], {
+        stopReason: "error",
+        errorMessage: "Instructions are required",
+      }),
+    ]);
 
-      initVibeManager({
-        modelRegistry: {
-          find(provider: string, modelId: string) {
-            return provider === "test-provider" && modelId === "test-model" ? model : undefined;
-          },
-          async getApiKeyAndHeaders() {
-            return { ok: true, apiKey: "test-key", headers: {} };
-          },
+    initVibeManager({
+      sessionManager: { getSessionId: () => "test-session" },
+      modelRegistry: {
+        find(provider: string, modelId: string) {
+          return provider === "test-provider" && modelId === "test-model" ? model : undefined;
         },
-      });
-
-      assert.equal(setVibeModel("test-provider/test-model"), true);
-
-      const result = await generateVibesBatch("noir", 2);
-
-      assert.equal(result.success, false);
-      assert.equal(result.error, "Instructions are required");
-    } finally {
-      registration.unregister();
-    }
-  } finally {
-    if (previousHome === undefined) {
-      delete process.env.HOME;
-    } else {
-      process.env.HOME = previousHome;
-    }
-    rmSync(home, { recursive: true, force: true });
-    links.cleanup();
-  }
-});
-
-test("working vibe settings refuse symlinked global settings", async () => {
-  const home = mkdtempSync(join(tmpdir(), "powerline-vibes-home-"));
-  const previousHome = process.env.HOME;
-  const settingsPath = join(home, ".pi", "agent", "settings.json");
-  const targetPath = join(home, "target-settings.json");
-  process.env.HOME = home;
-
-  try {
-    mkdirSync(join(home, ".pi", "agent"), { recursive: true });
-    writeFileSync(targetPath, JSON.stringify({ theme: "dark" }, null, 2) + "\n");
-    symlinkSync(targetPath, settingsPath);
-
-    const { setVibeTheme } = await import("../working-vibes.ts");
-
-    assert.equal(setVibeTheme("noir"), false);
-    assert.deepEqual(JSON.parse(readFileSync(targetPath, "utf8")), { theme: "dark" });
-  } finally {
-    if (previousHome === undefined) {
-      delete process.env.HOME;
-    } else {
-      process.env.HOME = previousHome;
-    }
-    rmSync(home, { recursive: true, force: true });
-  }
-});
-
-test("working vibe settings refuse dangling symlinked global settings", async () => {
-  const home = mkdtempSync(join(tmpdir(), "powerline-vibes-home-"));
-  const previousHome = process.env.HOME;
-  const settingsPath = join(home, ".pi", "agent", "settings.json");
-  process.env.HOME = home;
-
-  try {
-    mkdirSync(join(home, ".pi", "agent"), { recursive: true });
-    symlinkSync(join(home, "missing-settings.json"), settingsPath);
-
-    const { setVibeTheme } = await import("../working-vibes.ts");
-
-    assert.equal(setVibeTheme("noir"), false);
-  } finally {
-    if (previousHome === undefined) {
-      delete process.env.HOME;
-    } else {
-      process.env.HOME = previousHome;
-    }
-    rmSync(home, { recursive: true, force: true });
-  }
-});
-
-test("working vibe settings refuse symlinked global settings parent", async () => {
-  const home = mkdtempSync(join(tmpdir(), "powerline-vibes-home-"));
-  const targetDir = mkdtempSync(join(tmpdir(), "powerline-vibes-target-"));
-  const previousHome = process.env.HOME;
-  process.env.HOME = home;
-
-  try {
-    symlinkSync(targetDir, join(home, ".pi"));
-
-    const { setVibeTheme } = await import("../working-vibes.ts");
-
-    assert.equal(setVibeTheme("noir"), false);
-  } finally {
-    if (previousHome === undefined) {
-      delete process.env.HOME;
-    } else {
-      process.env.HOME = previousHome;
-    }
-    rmSync(home, { recursive: true, force: true });
-    rmSync(targetDir, { recursive: true, force: true });
-  }
-});
-
-test("working vibe file reads ignore symlinked paths", async () => {
-  const home = mkdtempSync(join(tmpdir(), "powerline-vibes-home-"));
-  const targetPath = join(home, "target-vibes.txt");
-  const previousHome = process.env.HOME;
-  process.env.HOME = home;
-
-  try {
-    mkdirSync(join(home, ".pi", "agent", "vibes"), { recursive: true });
-    writeFileSync(targetPath, "Leaked vibe...\n");
-    symlinkSync(targetPath, join(home, ".pi", "agent", "vibes", "noir.txt"));
-
-    const { getVibeFileCount, hasVibeFile } = await import("../working-vibes.ts");
-
-    assert.equal(hasVibeFile("noir"), false);
-    assert.equal(getVibeFileCount("noir"), 0);
-  } finally {
-    if (previousHome === undefined) {
-      delete process.env.HOME;
-    } else {
-      process.env.HOME = previousHome;
-    }
-    rmSync(home, { recursive: true, force: true });
-  }
-});
-
-test("working vibe files refuse symlinked vibe directories", async () => {
-  const links = ensurePiModuleLinks();
-  const home = mkdtempSync(join(tmpdir(), "powerline-vibes-home-"));
-  const targetDir = mkdtempSync(join(tmpdir(), "powerline-vibes-target-"));
-  const previousHome = process.env.HOME;
-  process.env.HOME = home;
-
-  try {
-    mkdirSync(join(home, ".pi", "agent"), { recursive: true });
-    writeFileSync(join(targetDir, "noir.txt"), "Leaked vibe...\n");
-    symlinkSync(targetDir, join(home, ".pi", "agent", "vibes"));
-
-    const { fauxAssistantMessage, registerFauxProvider } = await importFauxProviderTools();
-    const { generateVibesBatch, getVibeFileCount, hasVibeFile, initVibeManager, setVibeModel } = await import("../working-vibes.ts");
-
-    assert.equal(hasVibeFile("noir"), false);
-    assert.equal(getVibeFileCount("noir"), 0);
-
-    const registration = registerFauxProvider({
-      provider: "symlink-test-provider",
-      models: [{ id: "symlink-test-model" }],
+        async getApiKeyAndHeaders() {
+          return { ok: true, apiKey: "test-key", headers: {} };
+        },
+        getProvider(provider: string) {
+          return provider === "test-provider" ? registration.provider : undefined;
+        },
+        async getProviderAuth() {
+          return undefined;
+        },
+      },
     });
 
-    try {
-      const model = registration.getModel("symlink-test-model");
-      assert.ok(model);
-      registration.setResponses([fauxAssistantMessage("Fresh vibe...")]);
-      initVibeManager({
-        modelRegistry: {
-          find(provider: string, modelId: string) {
-            return provider === "symlink-test-provider" && modelId === "symlink-test-model" ? model : undefined;
-          },
-          async getApiKeyAndHeaders() {
-            return { ok: true, apiKey: "test-key", headers: {} };
-          },
-        },
-      });
-      assert.equal(setVibeModel("symlink-test-provider/symlink-test-model"), true);
+    assert.equal(setVibeModel("test-provider/test-model"), true);
 
-      const result = await generateVibesBatch("noir", 1);
-      assert.equal(result.success, false);
-      assert.match(result.error ?? "", /unsafe path/);
-      assert.equal(readFileSync(join(targetDir, "noir.txt"), "utf8"), "Leaked vibe...\n");
-    } finally {
-      registration.unregister();
-    }
-  } finally {
-    if (previousHome === undefined) {
-      delete process.env.HOME;
-    } else {
-      process.env.HOME = previousHome;
-    }
-    rmSync(home, { recursive: true, force: true });
-    rmSync(targetDir, { recursive: true, force: true });
-    links.cleanup();
-  }
-});
+    const result = await generateVibesBatch("noir", 2);
 
-test("setVibeTheme persists atomically, preserving unrelated keys and leaving no temp files", async () => {
-  const home = mkdtempSync(join(tmpdir(), "powerline-vibes-home-"));
-  const previousHome = process.env.HOME;
-  const agentDir = join(home, ".pi", "agent");
-  const settingsPath = join(agentDir, "settings.json");
-  process.env.HOME = home;
-
-  try {
-    mkdirSync(agentDir, { recursive: true });
-    writeFileSync(settingsPath, JSON.stringify({ theme: "dark", keep: 1 }, null, 2) + "\n");
-
-    const { setVibeTheme } = await import("../working-vibes.ts");
-
-    assert.equal(setVibeTheme("noir"), true);
-
-    const parsed = JSON.parse(readFileSync(settingsPath, "utf8"));
-    assert.equal(parsed.workingVibe, "noir");
-    assert.equal(parsed.keep, 1, "unrelated settings keys must be preserved");
-    assert.equal(parsed.theme, "dark", "unrelated settings keys must be preserved");
-
-    // The atomic write must clean up its temp file on success.
-    const leftoverTempFiles = readdirSync(agentDir).filter((name) => name.endsWith(".tmp"));
-    assert.deepEqual(leftoverTempFiles, [], "no temp files should remain after an atomic write");
-    if (process.platform !== "win32") {
-      assert.equal(statSync(settingsPath).mode & 0o777, 0o600, "working vibe settings writes should force private file permissions");
-    }
-  } finally {
-    if (previousHome === undefined) {
-      delete process.env.HOME;
-    } else {
-      process.env.HOME = previousHome;
-    }
-    rmSync(home, { recursive: true, force: true });
-  }
-});
-
-test("generateVibesBatch creates the vibes directory on first write", async () => {
-  const links = ensurePiModuleLinks();
-  const home = mkdtempSync(join(tmpdir(), "powerline-vibes-home-"));
-  const previousHome = process.env.HOME;
-  process.env.HOME = home;
-
-  try {
-    const { fauxAssistantMessage, registerFauxProvider } = await importFauxProviderTools();
-    const { generateVibesBatch, initVibeManager, setVibeModel } = await import("../working-vibes.ts");
-
-    const registration = registerFauxProvider({
-      provider: "test-provider",
-      models: [{ id: "test-model" }],
-    });
-
-    try {
-      const model = registration.getModel("test-model");
-      assert.ok(model);
-
-      registration.setResponses([
-        fauxAssistantMessage("First signal...\nSecond signal...")
-      ]);
-
-      initVibeManager({
-        modelRegistry: {
-          find(provider: string, modelId: string) {
-            return provider === "test-provider" && modelId === "test-model" ? model : undefined;
-          },
-          async getApiKeyAndHeaders() {
-            return { ok: true, apiKey: "test-key", headers: {} };
-          },
-        },
-      });
-
-      assert.equal(setVibeModel("test-provider/test-model"), true);
-
-      const result = await generateVibesBatch("star trek", 2);
-
-      assert.equal(result.success, true);
-      assert.equal(result.count, 2);
-      assert.equal(readFileSync(result.filePath, "utf8").trim().split("\n").length, 2);
-    } finally {
-      registration.unregister();
-    }
+    assert.equal(result.success, false);
+    assert.equal(result.error, "Instructions are required");
   } finally {
     if (previousHome === undefined) {
       delete process.env.HOME;
