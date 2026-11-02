@@ -234,6 +234,7 @@ test("editor-adjacent widgets cache queue and last-prompt work", () => {
   assert.match(source, /const QUEUE_SUMMARY_CACHE_TTL_MS = 250;/);
   assert.match(source, /queueSummaryCache = null;\r?\n\s+requestImmediateStatusRender/);
   assert.match(source, /lastPromptRenderCache\.source === lastUserPrompt/);
+  assert.match(source, /setWidget\("powerline-last-prompt"[\s\S]*?placement: "aboveEditor"/);
 });
 
 test("unknown context estimates are event-scoped and cleared before compaction", () => {

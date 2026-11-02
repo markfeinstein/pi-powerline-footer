@@ -3309,7 +3309,7 @@ export default function powerlineFooter(pi: ExtensionAPI) {
         render(width: number): string[] {
           return measureWidget("last-prompt", () => renderLastPromptLines(width));
         },
-      }), { placement: "belowEditor" });
+      }), { placement: "aboveEditor" });
     }
   }
 
