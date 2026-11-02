@@ -1279,6 +1279,7 @@ export default function powerlineFooter(pi: ExtensionAPI) {
   let approximateContextUsage: CoreContextUsage | null = null;
   let isStreaming = false;
   let tuiRef: any = null;
+  let workingTurnStartTime: number | null = null;
   let workingStatusTimer: ReturnType<typeof setInterval> | null = null;
   let restoreFooterStatusRepaintHook: (() => void) | null = null;
   let stashShortcutInputUnsubscribe: (() => void) | null = null;
@@ -1378,10 +1379,12 @@ export default function powerlineFooter(pi: ExtensionAPI) {
       clearInterval(workingStatusTimer);
       workingStatusTimer = null;
     }
+    workingTurnStartTime = null;
   };
 
   const startWorkingStatusTimer = () => {
     stopWorkingStatusTimer();
+    workingTurnStartTime = Date.now();
     workingStatusTimer = setInterval(() => tuiRef?.requestRender(), 1000);
   };
 
@@ -3330,8 +3333,8 @@ export default function powerlineFooter(pi: ExtensionAPI) {
       const editor = new BashModeEditor(tui, editorTheme, keybindings, {
         keybindings,
         embedWorkingStatus: config.workingIndicatorPlacement === "editor-border",
-        getWorkingStatusSuffix: () => isStreaming
-          ? `${getIcons().time} ${formatDuration(Date.now() - sessionStartTime)}`
+        getWorkingStatusSuffix: () => isStreaming && workingTurnStartTime !== null
+          ? `${getIcons().time} ${formatDuration(Date.now() - workingTurnStartTime)}`
           : undefined,
         isBashModeActive: () => bashModeActive,
         isShellRunning: () => shellSession?.state.running ?? false,
