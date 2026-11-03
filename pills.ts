@@ -1,6 +1,6 @@
 // Pill rendering: wrap status segments in rounded half-circle caps with a
-// solid background fill. Rounded caps require a Nerd Font and pill colors
-// require a truecolor terminal.
+// solid background fill. Rounded caps require a Nerd Font. Colors may use
+// truecolor hex values or the terminal's 16-color ANSI palette.
 import { ansi } from "./colors.ts";
 
 /** Left rounded cap (nf-ple-left_half_circle_thick, U+E0B6). */
@@ -11,6 +11,11 @@ export const PILL_RIGHT_CAP = "\uE0B4";
 /** Default pill background when none is configured. */
 export const DEFAULT_PILL_BACKGROUND = "#3b4252";
 
+function ansiPaletteIndex(color: string): number | null {
+  const match = /^ansi:([0-9]|1[0-5])$/.exec(color);
+  return match ? Number.parseInt(match[1]!, 10) : null;
+}
+
 function hexToRgb(hex: string): [number, number, number] {
   const value = hex.slice(1);
   return [
@@ -20,16 +25,18 @@ function hexToRgb(hex: string): [number, number, number] {
   ];
 }
 
-function bgAnsi(hex: string): string {
-  return ansi.getBgAnsi(...hexToRgb(hex));
+function bgAnsi(color: string): string {
+  const paletteIndex = ansiPaletteIndex(color);
+  return paletteIndex === null
+    ? ansi.getBgAnsi(...hexToRgb(color))
+    : ansi.getBgAnsi256(paletteIndex);
 }
 
-function capAnsi(hex: string): string {
-  return ansi.getFgAnsi(...hexToRgb(hex));
-}
-
-function fgAnsi(hex: string): string {
-  return ansi.getFgAnsi(...hexToRgb(hex));
+function fgAnsi(color: string): string {
+  const paletteIndex = ansiPaletteIndex(color);
+  return paletteIndex === null
+    ? ansi.getFgAnsi(...hexToRgb(color))
+    : ansi.getFgAnsi256(paletteIndex);
 }
 
 function stripSgr(text: string): string {
@@ -86,7 +93,7 @@ export function wrapInPillGroup(items: readonly PillSegment[], bold = false): st
 
   const reset = ansi.reset;
   const boldAnsi = bold ? "\x1b[1m" : "";
-  let output = `${capAnsi(items[0]!.bg)}${PILL_LEFT_CAP}${reset}`;
+  let output = `${fgAnsi(items[0]!.bg)}${PILL_LEFT_CAP}${reset}`;
 
   for (const item of items) {
     const background = bgAnsi(item.bg);
@@ -96,7 +103,7 @@ export function wrapInPillGroup(items: readonly PillSegment[], bold = false): st
     output += `${background}${item.leadingSpace ? " " : ""}${boldAnsi}${body}${item.trailingSpace === false ? "" : " "}`;
   }
 
-  output += `${reset}${capAnsi(items[items.length - 1]!.bg)}${PILL_RIGHT_CAP}${reset}`;
+  output += `${reset}${fgAnsi(items[items.length - 1]!.bg)}${PILL_RIGHT_CAP}${reset}`;
   return output;
 }
 

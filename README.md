@@ -241,37 +241,37 @@ Set `powerline.pills` to `true` to replace ordinary separators with rounded, fil
       "right": ["model", "thinking", "path", "git"],
       "secondary": []
     },
-    "pillBackground": "#a29eaf",
-    "pillForeground": "#d8d8dc",
-    "pillIconForeground": "#8a8a92",
+    "pillBackground": "ansi:0",
+    "pillForeground": "ansi:7",
+    "pillIconForeground": "ansi:8",
     "pillGroups": [
       ["token_in", "token_out", "cache_read"],
       ["model", "thinking"],
       ["path", "git"]
     ],
     "pillColors": {
-      "token_in": "#9eb1b0",
-      "token_out": "#9eb1b0",
-      "cache_read": "#9eb1b0",
-      "context_pct": "#b3a791",
-      "cost": "#d3b16f",
-      "model": "#ad9bc4",
-      "thinking": "#d2b082",
-      "path": "#97b8be",
-      "git": "#ccaeac"
+      "token_in": "ansi:12",
+      "token_out": "ansi:12",
+      "cache_read": "ansi:12",
+      "context_pct": "ansi:12",
+      "cost": "ansi:11",
+      "model": "ansi:13",
+      "thinking": "ansi:14",
+      "path": "ansi:12",
+      "git": "ansi:9"
     },
     "pillTextColors": {
-      "cost": "#eeeeef"
+      "cost": "ansi:15"
     },
     "pillIconColors": {
-      "cost": "#a0a0a6"
+      "cost": "ansi:8"
     },
     "alwaysShowTokens": true
   }
 }
 ```
 
-`pillBackground` is the fallback `#RRGGBB` background. `pillColors` and `pillTextColors` provide per-segment background and text overrides; `pillForeground` supplies the default text foreground. `pillIconForeground` and `pillIconColors` independently color a segment's leading icon token when that segment also has a configured text foreground. Adjacent visible segments listed in the same `pillGroups` entry share one capsule and stay together during responsive overflow. `bold` affects pill text and icons. When `alwaysShowTokens` is true, token input/output and cache segments remain visible at zero.
+Pill colors accept either `#RRGGBB` or `ansi:0` through `ansi:15`. ANSI values resolve through the terminal's active 16-color palette, so changing the terminal theme updates the pills without rewriting Powerline settings. `pillBackground` is the fallback background. `pillColors` and `pillTextColors` provide per-segment background and text overrides; `pillForeground` supplies the default text foreground. `pillIconForeground` and `pillIconColors` independently color a segment's leading icon token when that segment also has a configured text foreground. Adjacent visible segments listed in the same `pillGroups` entry share one capsule and stay together during responsive overflow. `bold` affects pill text and icons. When `alwaysShowTokens` is true, token input/output and cache segments remain visible at zero.
 
 Set `powerline.padding` to an integer from `0` to `8` to control the outer spaces on each edge of every primary and secondary bar row (including wrapped rows). The default is `1`, preserving the existing layout; malformed or out-of-range values fall back to `1`. Use `0` for a flush-left bar:
 

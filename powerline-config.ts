@@ -118,19 +118,23 @@ function normalizeSeparator(value: unknown): StatusLineSeparatorStyle | null {
 }
 
 const HEX_COLOR = /^#[0-9a-fA-F]{6}$/;
+const ANSI_PALETTE_COLOR = /^ansi:([0-9]|1[0-5])$/;
 
-function normalizeHexColor(value: unknown, fallback: string): string {
-  return typeof value === "string" && HEX_COLOR.test(value.trim()) ? value.trim() : fallback;
+function normalizePillColor(value: unknown, fallback: string): string {
+  if (typeof value !== "string") return fallback;
+  const color = value.trim();
+  if (HEX_COLOR.test(color)) return color;
+  const normalized = color.toLowerCase();
+  return ANSI_PALETTE_COLOR.test(normalized) ? normalized : fallback;
 }
 
-function normalizeHexColorMap(value: unknown): Record<string, string> {
+function normalizePillColorMap(value: unknown): Record<string, string> {
   if (!isRecord(value)) return {};
 
   const colors: Record<string, string> = {};
   for (const [segmentId, rawColor] of Object.entries(value)) {
-    if (typeof rawColor === "string" && HEX_COLOR.test(rawColor.trim())) {
-      colors[segmentId] = rawColor.trim();
-    }
+    const color = normalizePillColor(rawColor, "");
+    if (color) colors[segmentId] = color;
   }
   return colors;
 }
@@ -453,12 +457,12 @@ export function parsePowerlineConfig(value: unknown, presets: readonly StatusLin
       ? value.padding
       : defaultConfig.padding,
     pills: value.pills === true,
-    pillBackground: normalizeHexColor(value.pillBackground, DEFAULT_PILL_BACKGROUND),
-    pillColors: normalizeHexColorMap(value.pillColors),
-    pillForeground: normalizeHexColor(value.pillForeground, ""),
-    pillTextColors: normalizeHexColorMap(value.pillTextColors),
-    pillIconForeground: normalizeHexColor(value.pillIconForeground, ""),
-    pillIconColors: normalizeHexColorMap(value.pillIconColors),
+    pillBackground: normalizePillColor(value.pillBackground, DEFAULT_PILL_BACKGROUND),
+    pillColors: normalizePillColorMap(value.pillColors),
+    pillForeground: normalizePillColor(value.pillForeground, ""),
+    pillTextColors: normalizePillColorMap(value.pillTextColors),
+    pillIconForeground: normalizePillColor(value.pillIconForeground, ""),
+    pillIconColors: normalizePillColorMap(value.pillIconColors),
     pillGroups: normalizePillGroups(value.pillGroups),
     alwaysShowTokens: value.alwaysShowTokens === true,
     bold: value.bold === true,

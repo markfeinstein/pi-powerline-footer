@@ -4,6 +4,7 @@
 export interface AnsiColors {
   getBgAnsi(r: number, g: number, b: number): string;
   getFgAnsi(r: number, g: number, b: number): string;
+  getBgAnsi256(code: number): string;
   getFgAnsi256(code: number): string;
   reset: string;
 }
@@ -11,6 +12,7 @@ export interface AnsiColors {
 export const ansi: AnsiColors = {
   getBgAnsi: (r, g, b) => `\x1b[48;2;${r};${g};${b}m`,
   getFgAnsi: (r, g, b) => `\x1b[38;2;${r};${g};${b}m`,
+  getBgAnsi256: (code) => `\x1b[48;5;${code}m`,
   getFgAnsi256: (code) => `\x1b[38;5;${code}m`,
   reset: "\x1b[0m",
 };

@@ -24,6 +24,20 @@ test("wrapInPill adds rounded caps and a background fill", () => {
   assert.equal(visibleWidth(pill), visibleWidth("model") + visibleWidth(PILL_LEFT_CAP) + visibleWidth(PILL_RIGHT_CAP) + 1);
 });
 
+test("pill rendering supports terminal ANSI palette colors", () => {
+  const pill = wrapInPillGroup([{
+    content: "icon text",
+    bg: "ansi:12",
+    fg: "ansi:7",
+    iconFg: "ansi:8",
+  }]);
+
+  assert.ok(pill.startsWith(`\x1b[38;5;12m${PILL_LEFT_CAP}${reset}`));
+  assert.ok(pill.includes("\x1b[48;5;12m"));
+  assert.ok(pill.includes("\x1b[38;5;8micon\x1b[38;5;7m text"));
+  assert.ok(pill.endsWith(`\x1b[38;5;12m${PILL_RIGHT_CAP}${reset}`));
+});
+
 test("pill rendering reasserts background after embedded resets", () => {
   const content = `\x1b[38;2;1;1;1mA${reset}\x1b[38;2;2;2;2mB${reset}`;
   const pill = wrapInPill(content, "#000000");
@@ -146,6 +160,24 @@ test("parsePowerlineConfig validates pill settings", () => {
   assert.equal(config.alwaysShowTokens, true);
   assert.equal(config.bold, true);
   assert.equal(config.nerdFonts, true);
+});
+
+test("parsePowerlineConfig accepts terminal ANSI palette colors", () => {
+  const config = parsePowerlineConfig({
+    pillBackground: "ANSI:0",
+    pillColors: { path: "ansi:12", bad: "ansi:16" },
+    pillForeground: "ansi:7",
+    pillTextColors: { git: "ANSI:15" },
+    pillIconForeground: "ansi:8",
+    pillIconColors: { git: "ansi:0" },
+  }, PRESETS);
+
+  assert.equal(config.pillBackground, "ansi:0");
+  assert.deepEqual(config.pillColors, { path: "ansi:12" });
+  assert.equal(config.pillForeground, "ansi:7");
+  assert.deepEqual(config.pillTextColors, { git: "ansi:15" });
+  assert.equal(config.pillIconForeground, "ansi:8");
+  assert.deepEqual(config.pillIconColors, { git: "ansi:0" });
 });
 
 test("invalid pill settings fall back safely", () => {
