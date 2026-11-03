@@ -25,7 +25,7 @@ import { matchHistoryEntries, readGlobalShellHistory, readProjectHistory, append
 import type { BashModeSettings } from "./bash-mode/types.ts";
 import { getPreset, PRESETS } from "./presets.ts";
 import { getAgentPath } from "./paths.ts";
-import { collectHiddenExtensionStatusKeys, getNotificationExtensionStatuses, mergeSegmentOptions, mergeSegmentsWithCustomItems, nextPowerlineSettingWithOptions, nextPowerlineSettingWithPreset, parsePowerlineConfig } from "./powerline-config.ts";
+import { collectHiddenExtensionStatusKeys, getNotificationExtensionStatuses, mergeSegmentOptions, mergeSegmentsWithCustomItems, nextPowerlineSettingWithOptions, nextPowerlineSettingWithPreset, parsePowerlineConfig, resolvePillForeground } from "./powerline-config.ts";
 import { getSeparator } from "./separators.ts";
 import { getIcons, setNerdFontsPreference } from "./icons.ts";
 import { buildPillUnits, DEFAULT_PILL_BACKGROUND, type PillSegment, wrapInPillGroup } from "./pills.ts";
@@ -1135,7 +1135,7 @@ function buildRenderedStatusUnits(
     config.pillColors,
     config.pillBackground,
     config.pillTextColors,
-    config.pillForeground,
+    resolvePillForeground(config.pillForeground),
     config.pillIconColors,
     config.pillIconForeground,
   ).map((pillParts) => {

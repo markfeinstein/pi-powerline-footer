@@ -144,6 +144,14 @@ function normalizePillForeground(value: unknown, fallback: string): string {
   return normalizePillColor(value, fallback);
 }
 
+/** Resolve an optional process-local foreground override without weakening config validation. */
+export function resolvePillForeground(
+  configured: string,
+  override: unknown = process.env.POWERLINE_PILL_FOREGROUND,
+): string {
+  return normalizePillForeground(override, "") || configured;
+}
+
 function normalizePillForegroundMap(value: unknown): Record<string, string> {
   if (!isRecord(value)) return {};
 

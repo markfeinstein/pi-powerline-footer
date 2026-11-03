@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { visibleWidth } from "@earendil-works/pi-tui";
-import { parsePowerlineConfig } from "../powerline-config.ts";
+import { parsePowerlineConfig, resolvePillForeground } from "../powerline-config.ts";
 import {
   buildPillUnits,
   DEFAULT_PILL_BACKGROUND,
@@ -230,6 +230,14 @@ test("parsePowerlineConfig accepts terminal-default foregrounds", () => {
   assert.deepEqual(config.pillTextColors, { cost: "default" });
   assert.equal(config.pillIconForeground, "default");
   assert.deepEqual(config.pillIconColors, { git: "default" });
+});
+
+test("process-local pill foreground overrides are validated", () => {
+  assert.equal(resolvePillForeground("ansi:0", "#1f1d2d"), "#1f1d2d");
+  assert.equal(resolvePillForeground("ansi:0", "ANSI:7"), "ansi:7");
+  assert.equal(resolvePillForeground("ansi:0", "DEFAULT"), "default");
+  assert.equal(resolvePillForeground("ansi:0", "surface"), "ansi:0");
+  assert.equal(resolvePillForeground("ansi:0", null), "ansi:0");
 });
 
 test("invalid pill settings fall back safely", () => {
