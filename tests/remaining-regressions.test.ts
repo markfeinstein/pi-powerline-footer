@@ -57,6 +57,18 @@ function createSegmentContext(overrides: Partial<SegmentContext> = {}): SegmentC
   };
 }
 
+test("git segment exposes clean and dirty pill color keys", () => {
+  const clean = renderSegment("git", createSegmentContext({
+    git: { branch: "main", staged: 0, unstaged: 0, untracked: 0 },
+  }));
+  const dirty = renderSegment("git", createSegmentContext({
+    git: { branch: "main", staged: 0, unstaged: 1, untracked: 0 },
+  }));
+
+  assert.equal(clean.pillColorKey, "gitClean");
+  assert.equal(dirty.pillColorKey, "gitDirty");
+});
+
 test("session segment shows the current display name when available", () => {
   const rendered = renderSegment("session", createSegmentContext({
     sessionId: "12345678-abcdef",

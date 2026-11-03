@@ -113,7 +113,7 @@ export function wrapInPillGroup(items: readonly PillSegment[], bold = false): st
  * same configured group share one capsule; all other segments get their own.
  */
 export function buildPillUnits(
-  parts: readonly { id: string; content: string }[],
+  parts: readonly { id: string; content: string; pillColorKey?: string }[],
   groups: readonly (readonly string[])[],
   colors: Readonly<Record<string, string>>,
   defaultBg: string,
@@ -134,7 +134,7 @@ export function buildPillUnits(
     const segment: PillSegment = {
       id: part.id,
       content: part.content,
-      bg: colors[part.id] ?? defaultBg,
+      bg: (part.pillColorKey ? colors[part.pillColorKey] : undefined) ?? colors[part.id] ?? defaultBg,
       leadingSpace: continuesGroup,
       trailingSpace: !NO_TRAILING_SPACE.has(part.id),
       ...(foreground ? { fg: foreground } : {}),

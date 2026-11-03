@@ -258,7 +258,9 @@ Set `powerline.pills` to `true` to replace ordinary separators with rounded, fil
       "model": "ansi:13",
       "thinking": "ansi:14",
       "path": "ansi:12",
-      "git": "ansi:9"
+      "git": "ansi:14",
+      "gitClean": "ansi:10",
+      "gitDirty": "ansi:9"
     },
     "pillTextColors": {
       "cost": "ansi:15"
@@ -271,7 +273,7 @@ Set `powerline.pills` to `true` to replace ordinary separators with rounded, fil
 }
 ```
 
-Pill colors accept either `#RRGGBB` or `ansi:0` through `ansi:15`. ANSI values resolve through the terminal's active 16-color palette, so changing the terminal theme updates the pills without rewriting Powerline settings. Text and icon foregrounds also accept `default`, which emits the terminal-default foreground instead of an application color override. `pillBackground` is the fallback background. `pillColors` and `pillTextColors` provide per-segment background and text overrides; `pillForeground` supplies the default text foreground. `pillIconForeground` and `pillIconColors` independently color a segment's leading icon token when that segment also has a configured text foreground. Adjacent visible segments listed in the same `pillGroups` entry share one capsule and stay together during responsive overflow. `bold` affects pill text and icons. When `alwaysShowTokens` is true, token input/output and cache segments remain visible at zero.
+Pill colors accept either `#RRGGBB` or `ansi:0` through `ansi:15`. ANSI values resolve through the terminal's active 16-color palette, so changing the terminal theme updates the pills without rewriting Powerline settings. Text and icon foregrounds also accept `default`, which emits the terminal-default foreground instead of an application color override. `pillBackground` is the fallback background. `pillColors` and `pillTextColors` provide per-segment background and text overrides; `pillForeground` supplies the default text foreground. The Git segment first checks the state-aware `gitClean` or `gitDirty` pill color and falls back to `git`, allowing clean and modified repositories to use distinct backgrounds. `pillIconForeground` and `pillIconColors` independently color a segment's leading icon token when that segment also has a configured text foreground. Adjacent visible segments listed in the same `pillGroups` entry share one capsule and stay together during responsive overflow. `bold` affects pill text and icons. When `alwaysShowTokens` is true, token input/output and cache segments remain visible at zero.
 
 Set `powerline.padding` to an integer from `0` to `8` to control the outer spaces on each edge of every primary and secondary bar row (including wrapped rows). The default is `1`, preserving the existing layout; malformed or out-of-range values fall back to `1`. Use `0` for a flush-left bar:
 

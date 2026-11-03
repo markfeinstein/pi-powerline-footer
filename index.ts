@@ -1107,18 +1107,23 @@ export function renderFastPowerlineEditor(
 function renderSegmentWithWidth(
   segId: StatusLineSegmentId,
   ctx: SegmentContext,
-): { content: string; width: number; visible: boolean } {
+): { content: string; width: number; visible: boolean; pillColorKey?: string } {
   const rendered = renderSegment(segId, ctx);
   if (!rendered.visible || !rendered.content) {
     return { content: "", width: 0, visible: false };
   }
-  return { content: rendered.content, width: visibleWidth(rendered.content), visible: true };
+  return {
+    content: rendered.content,
+    width: visibleWidth(rendered.content),
+    visible: true,
+    ...(rendered.pillColorKey ? { pillColorKey: rendered.pillColorKey } : {}),
+  };
 }
 
 type RenderedStatusUnit = { content: string; width: number; pillParts?: readonly PillSegment[] };
 
 function buildRenderedStatusUnits(
-  parts: readonly { id: string; content: string; width: number }[],
+  parts: readonly { id: string; content: string; width: number; pillColorKey?: string }[],
 ): RenderedStatusUnit[] {
   if (!config.pills) {
     return parts.map(({ content, width }) => ({ content, width }));
@@ -1183,10 +1188,17 @@ function computeResponsiveLayout(
   const separatorStyle = config.separator ?? presetDef.separator;
   const separatorWidth = config.pills ? 1 : visibleWidth(getSeparator(separatorStyle).left) + 2;
 
-  const renderedParts: { id: string; content: string; width: number }[] = [];
+  const renderedParts: { id: string; content: string; width: number; pillColorKey?: string }[] = [];
   for (const segmentId of allSegmentIds) {
-    const { content, width, visible } = renderSegmentWithWidth(segmentId, ctx);
-    if (visible) renderedParts.push({ id: segmentId, content, width });
+    const { content, width, visible, pillColorKey } = renderSegmentWithWidth(segmentId, ctx);
+    if (visible) {
+      renderedParts.push({
+        id: segmentId,
+        content,
+        width,
+        ...(pillColorKey ? { pillColorKey } : {}),
+      });
+    }
   }
 
   const renderedUnits = buildRenderedStatusUnits(renderedParts);

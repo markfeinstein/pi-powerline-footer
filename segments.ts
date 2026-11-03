@@ -241,7 +241,7 @@ const gitSegment: StatusLineSegment = {
 
     if (!branch && !gitStatus) return { content: "", visible: false };
 
-    const isDirty = gitStatus && (gitStatus.staged > 0 || gitStatus.unstaged > 0 || gitStatus.untracked > 0);
+    const isDirty = Boolean(gitStatus && (gitStatus.staged > 0 || gitStatus.unstaged > 0 || gitStatus.untracked > 0));
     const showBranch = opts.showBranch !== false;
     const branchColor: SemanticColor = isDirty ? "gitDirty" : "gitClean";
 
@@ -278,7 +278,7 @@ const gitSegment: StatusLineSegment = {
 
     if (!content) return { content: "", visible: false };
 
-    return { content, visible: true };
+    return { content, visible: true, pillColorKey: isDirty ? "gitDirty" : "gitClean" };
   },
 };
 

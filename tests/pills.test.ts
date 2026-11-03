@@ -109,6 +109,23 @@ test("buildPillUnits groups only adjacent configured segments", () => {
   assert.equal(separated.length, 3);
 });
 
+test("buildPillUnits prefers state-aware colors and falls back to the segment color", () => {
+  const units = buildPillUnits(
+    [
+      { id: "git", content: "clean", pillColorKey: "gitClean" },
+      { id: "git", content: "dirty", pillColorKey: "gitDirty" },
+      { id: "git", content: "fallback", pillColorKey: "gitUnknown" },
+    ],
+    [],
+    { git: "#111111", gitClean: "#222222", gitDirty: "ansi:9" },
+    "#000000",
+  );
+
+  assert.equal(units[0]![0]!.bg, "#222222");
+  assert.equal(units[1]![0]!.bg, "ansi:9");
+  assert.equal(units[2]![0]!.bg, "#111111");
+});
+
 test("buildPillUnits applies default and per-segment icon foregrounds", () => {
   const units = buildPillUnits(
     [
@@ -150,7 +167,7 @@ test("parsePowerlineConfig validates pill settings", () => {
   const config = parsePowerlineConfig({
     pills: true,
     pillBackground: "#1a2b3c",
-    pillColors: { path: "#123456", bad: "nope" },
+    pillColors: { path: "#123456", gitClean: "ansi:10", gitDirty: "ansi:9", bad: "nope" },
     pillForeground: "#232136",
     pillTextColors: { git: "#abcdef", bad: "nope" },
     pillIconForeground: "#575279",
@@ -163,7 +180,7 @@ test("parsePowerlineConfig validates pill settings", () => {
 
   assert.equal(config.pills, true);
   assert.equal(config.pillBackground, "#1a2b3c");
-  assert.deepEqual(config.pillColors, { path: "#123456" });
+  assert.deepEqual(config.pillColors, { path: "#123456", gitClean: "ansi:10", gitDirty: "ansi:9" });
   assert.equal(config.pillForeground, "#232136");
   assert.deepEqual(config.pillTextColors, { git: "#abcdef" });
   assert.equal(config.pillIconForeground, "#575279");

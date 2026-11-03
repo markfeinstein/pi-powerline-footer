@@ -247,6 +247,8 @@ export interface SegmentContext {
 export interface RenderedSegment {
   content: string;
   visible: boolean;
+  /** Optional pill color lookup key for state-aware segment backgrounds. */
+  pillColorKey?: string;
 }
 
 // Segment definition
