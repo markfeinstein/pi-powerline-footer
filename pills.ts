@@ -36,12 +36,28 @@ function stripSgr(text: string): string {
   return text.replace(/\x1b\[[0-9;]*m/g, "");
 }
 
+function coloredPillBody(content: string, textHex: string, iconHex?: string): string {
+  const plain = stripSgr(content);
+  if (!iconHex) {
+    return `${fgAnsi(textHex)}${plain}`;
+  }
+
+  const iconBoundary = plain.indexOf(" ");
+  if (iconBoundary <= 0) {
+    return `${fgAnsi(textHex)}${plain}`;
+  }
+
+  return `${fgAnsi(iconHex)}${plain.slice(0, iconBoundary)}${fgAnsi(textHex)}${plain.slice(iconBoundary)}`;
+}
+
 export interface PillSegment {
   id?: string;
   content: string;
   bg: string;
-  /** Optional text/icon color. When set, the segment's own colors are replaced. */
+  /** Optional text color. When set, the segment's own colors are replaced. */
   fg?: string;
+  /** Optional color for the leading icon token before the first space. */
+  iconFg?: string;
   leadingSpace?: boolean;
   trailingSpace?: boolean;
 }
@@ -75,7 +91,7 @@ export function wrapInPillGroup(items: readonly PillSegment[], bold = false): st
   for (const item of items) {
     const background = bgAnsi(item.bg);
     const body = item.fg
-      ? `${boldAnsi}${fgAnsi(item.fg)}${stripSgr(item.content)}`
+      ? `${boldAnsi}${coloredPillBody(item.content, item.fg, item.iconFg)}`
       : item.content.split(reset).join(`${reset}${background}${boldAnsi}`);
     output += `${background}${item.leadingSpace ? " " : ""}${boldAnsi}${body}${item.trailingSpace === false ? "" : " "}`;
   }
@@ -95,6 +111,8 @@ export function buildPillUnits(
   defaultBg: string,
   fgColors: Readonly<Record<string, string>> = {},
   defaultFg = "",
+  iconColors: Readonly<Record<string, string>> = {},
+  defaultIconFg = "",
 ): PillSegment[][] {
   const groupIndexOf = (id: string): number => groups.findIndex((group) => group.includes(id));
   const units: PillSegment[][] = [];
@@ -104,6 +122,7 @@ export function buildPillUnits(
     const groupIndex = groupIndexOf(part.id);
     const continuesGroup = groupIndex !== -1 && groupIndex === currentGroup && units.length > 0;
     const foreground = fgColors[part.id] ?? defaultFg;
+    const iconForeground = foreground ? (iconColors[part.id] ?? defaultIconFg) : "";
     const segment: PillSegment = {
       id: part.id,
       content: part.content,
@@ -111,6 +130,7 @@ export function buildPillUnits(
       leadingSpace: continuesGroup,
       trailingSpace: !NO_TRAILING_SPACE.has(part.id),
       ...(foreground ? { fg: foreground } : {}),
+      ...(iconForeground ? { iconFg: iconForeground } : {}),
     };
 
     if (continuesGroup) {

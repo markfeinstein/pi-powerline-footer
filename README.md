@@ -242,7 +242,8 @@ Set `powerline.pills` to `true` to replace ordinary separators with rounded, fil
       "secondary": []
     },
     "pillBackground": "#a29eaf",
-    "pillForeground": "#232136",
+    "pillForeground": "#d8d8dc",
+    "pillIconForeground": "#8a8a92",
     "pillGroups": [
       ["token_in", "token_out", "cache_read"],
       ["model", "thinking"],
@@ -259,12 +260,18 @@ Set `powerline.pills` to `true` to replace ordinary separators with rounded, fil
       "path": "#97b8be",
       "git": "#ccaeac"
     },
+    "pillTextColors": {
+      "cost": "#eeeeef"
+    },
+    "pillIconColors": {
+      "cost": "#a0a0a6"
+    },
     "alwaysShowTokens": true
   }
 }
 ```
 
-`pillBackground` is the fallback `#RRGGBB` background. `pillColors` and `pillTextColors` provide per-segment background and foreground overrides; `pillForeground` supplies the default foreground. Adjacent visible segments listed in the same `pillGroups` entry share one capsule and stay together during responsive overflow. `bold` affects pill text only. When `alwaysShowTokens` is true, token input/output and cache segments remain visible at zero.
+`pillBackground` is the fallback `#RRGGBB` background. `pillColors` and `pillTextColors` provide per-segment background and text overrides; `pillForeground` supplies the default text foreground. `pillIconForeground` and `pillIconColors` independently color a segment's leading icon token when that segment also has a configured text foreground. Adjacent visible segments listed in the same `pillGroups` entry share one capsule and stay together during responsive overflow. `bold` affects pill text and icons. When `alwaysShowTokens` is true, token input/output and cache segments remain visible at zero.
 
 Set `powerline.padding` to an integer from `0` to `8` to control the outer spaces on each edge of every primary and secondary bar row (including wrapped rows). The default is `1`, preserving the existing layout; malformed or out-of-range values fall back to `1`. Use `0` for a flush-left bar:
 

@@ -94,6 +94,8 @@ let config: PowerlineConfig = {
   pillColors: {},
   pillForeground: "",
   pillTextColors: {},
+  pillIconForeground: "",
+  pillIconColors: {},
   pillGroups: [],
   alwaysShowTokens: false,
   bold: false,
@@ -1129,6 +1131,8 @@ function buildRenderedStatusUnits(
     config.pillBackground,
     config.pillTextColors,
     config.pillForeground,
+    config.pillIconColors,
+    config.pillIconForeground,
   ).map((pillParts) => {
     const content = wrapInPillGroup(pillParts, config.bold);
     return { content, width: visibleWidth(content), pillParts };

@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { renderSegment } from "../segments.ts";
+import { NERD_ICONS, setNerdFontsPreference } from "../icons.ts";
 import { rainbow } from "../theme.ts";
 import type { ColorScheme, SegmentContext, ThemeLike } from "../types.ts";
 
@@ -61,6 +62,16 @@ test("thinking segment uses per-level colors for off through medium", () => {
   assert.equal(minimal.content, `${hexAnsi("#222222")}🧠 min\x1b[0m`);
   assert.equal(low.content, `${hexAnsi("#333333")}🧠 low\x1b[0m`);
   assert.equal(medium.content, `${hexAnsi("#444444")}🧠 med\x1b[0m`);
+});
+
+test("thinking segment uses the monochrome Nerd Font brain when enabled", () => {
+  try {
+    setNerdFontsPreference(true);
+    const rendered = renderSegment("thinking", createSegmentContext("medium", { thinkingMedium: "#444444" }));
+    assert.equal(rendered.content, `${hexAnsi("#444444")}${NERD_ICONS.thinking} med\x1b[0m`);
+  } finally {
+    setNerdFontsPreference(null);
+  }
 });
 
 test("thinking segment uses rainbow styling for high through max by default", () => {

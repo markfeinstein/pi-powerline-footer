@@ -285,6 +285,7 @@ const gitSegment: StatusLineSegment = {
 const thinkingSegment: StatusLineSegment = {
   id: "thinking",
   render(ctx) {
+    const icons = getIcons();
     const level = ctx.thinkingLevel || "off";
 
     const levelText: Record<string, string> = {
@@ -296,7 +297,7 @@ const thinkingSegment: StatusLineSegment = {
       xhigh: "xhigh",
     };
     const label = levelText[level] || level;
-    const content = `🧠 ${label}`;
+    const content = withIcon(icons.thinking, label);
 
     if (level === "high") {
       return { content: color(ctx, "thinkingHigh", content), visible: true };

@@ -6,6 +6,7 @@ test("context and cache use distinct Nerd Font symbols", () => {
   assert.equal(NERD_ICONS.context, "\u{F035B}");
   assert.equal(NERD_ICONS.cache, "\u{F00E8}");
   assert.equal(NERD_ICONS.auto, "\u{F0615}");
+  assert.equal(NERD_ICONS.thinking, "\u{F09D1}");
   assert.notEqual(NERD_ICONS.context, NERD_ICONS.cache);
 });
 

@@ -3,6 +3,7 @@ import { loadThemeConfig } from "./theme.ts";
 export interface IconSet {
   pi: string;
   model: string;
+  thinking: string;
   providerGithub: string;
   providerOpenai: string;
   providerAnthropic: string;
@@ -59,6 +60,7 @@ export function getThinkingText(level: string): string | undefined {
 export const NERD_ICONS: IconSet = {
   pi: "\uE22C",         // nf-oct-pi (stylized pi icon)
   model: "\uEC19",      // nf-cod-chip (generic model/AI chip)
+  thinking: "\u{F09D1}", // nf-md-brain
   providerGithub: "\uF09B",    // nf-fa-github
   providerOpenai: "\uEC81",    // nf-cod-openai
   providerAnthropic: "\uEC82", // nf-cod-claude
@@ -86,6 +88,7 @@ export const NERD_ICONS: IconSet = {
 export const ASCII_ICONS: IconSet = {
   pi: "π",
   model: "",
+  thinking: "🧠",
   providerGithub: "GH",
   providerOpenai: "OA",
   providerAnthropic: "AN",

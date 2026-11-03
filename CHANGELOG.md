@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Added
+- **Independent pill icon colors** — Set `powerline.pillIconForeground` or per-segment `pillIconColors` to make leading icons darker or lighter than pill text.
 - **Rounded pill layout** — Set `powerline.pills` to render segments as truecolor capsules with Nerd Font caps, per-segment colors, adjacent segment grouping, optional foreground overrides, bold text, and responsive group-aware overflow.
 - **Provider-aware model display** — Show GitHub, OpenAI, or Claude provider icons and compact family-first names such as `Sol 5.6` and `Opus 5.5`, with generic fallbacks for other providers.
 - **Working-status timer** — The current-turn timer and `#turn` counter render beside Pi's embedded Working/Waiting indicator instead of consuming a footer row, resetting for each prompt and remaining visible for 10 seconds after completion.
@@ -11,7 +12,7 @@
 ### Changed
 - **Last prompt spacing** — Add a blank row between the last user prompt and the below-editor status line.
 - **Last prompt placement** — Render the last user prompt between the editor and the below-editor status line.
-- **Thinking label** — Replaced the `think:` prefix with a brain emoji for a more compact status segment.
+- **Thinking label** — Use a monochrome Nerd Font brain when available, with the brain emoji retained as the fallback, so pill icon colors apply consistently.
 - **Context and cache icons** — Use a memory symbol for the context window and a cached/refresh symbol for prompt-cache statistics instead of two identical database symbols.
 - **Reported subscription cost** — `cost.subscriptionDisplay: "reported-cost"` now shows `$0.00` when a subscription session has no reported charge instead of falling back to `(sub)`.
 

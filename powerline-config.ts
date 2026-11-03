@@ -25,6 +25,8 @@ export interface PowerlineConfig {
   pillColors: Record<string, string>;
   pillForeground: string;
   pillTextColors: Record<string, string>;
+  pillIconForeground: string;
+  pillIconColors: Record<string, string>;
   pillGroups: string[][];
   alwaysShowTokens: boolean;
   bold: boolean;
@@ -405,6 +407,8 @@ export function parsePowerlineConfig(value: unknown, presets: readonly StatusLin
     pillColors: {},
     pillForeground: "",
     pillTextColors: {},
+    pillIconForeground: "",
+    pillIconColors: {},
     pillGroups: [],
     alwaysShowTokens: false,
     bold: false,
@@ -453,6 +457,8 @@ export function parsePowerlineConfig(value: unknown, presets: readonly StatusLin
     pillColors: normalizeHexColorMap(value.pillColors),
     pillForeground: normalizeHexColor(value.pillForeground, ""),
     pillTextColors: normalizeHexColorMap(value.pillTextColors),
+    pillIconForeground: normalizeHexColor(value.pillIconForeground, ""),
+    pillIconColors: normalizeHexColorMap(value.pillIconColors),
     pillGroups: normalizePillGroups(value.pillGroups),
     alwaysShowTokens: value.alwaysShowTokens === true,
     bold: value.bold === true,

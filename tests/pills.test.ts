@@ -83,14 +83,40 @@ test("buildPillUnits groups only adjacent configured segments", () => {
   assert.equal(separated.length, 3);
 });
 
-test("pill foreground overrides embedded segment colors and supports bold", () => {
+test("buildPillUnits applies default and per-segment icon foregrounds", () => {
+  const units = buildPillUnits(
+    [
+      { id: "path", content: "icon path" },
+      { id: "git", content: "icon git" },
+    ],
+    [],
+    {},
+    "#000000",
+    { git: "#eeeeee" },
+    "#dddddd",
+    { git: "#222222" },
+    "#333333",
+  );
+
+  assert.equal(units[0]![0]!.fg, "#dddddd");
+  assert.equal(units[0]![0]!.iconFg, "#333333");
+  assert.equal(units[1]![0]!.fg, "#eeeeee");
+  assert.equal(units[1]![0]!.iconFg, "#222222");
+});
+
+test("pill foregrounds separately color a leading icon and text", () => {
   const pill = wrapInPillGroup(
-    [{ content: "\x1b[38;2;9;9;9micon text\x1b[0m", bg: "#000000", fg: "#abcdef" }],
+    [{
+      content: "\x1b[38;2;9;9;9micon text\x1b[0m",
+      bg: "#000000",
+      fg: "#abcdef",
+      iconFg: "#123456",
+    }],
     true,
   );
 
   assert.ok(!pill.includes("38;2;9;9;9m"));
-  assert.ok(pill.includes("\x1b[38;2;171;205;239m"));
+  assert.ok(pill.includes("\x1b[38;2;18;52;86micon\x1b[38;2;171;205;239m text"));
   assert.ok(pill.includes("\x1b[1m"));
 });
 
@@ -101,6 +127,8 @@ test("parsePowerlineConfig validates pill settings", () => {
     pillColors: { path: "#123456", bad: "nope" },
     pillForeground: "#232136",
     pillTextColors: { git: "#abcdef", bad: "nope" },
+    pillIconForeground: "#575279",
+    pillIconColors: { git: "#393552", bad: "nope" },
     pillGroups: [["path", "git", "path"], "bad", [42]],
     alwaysShowTokens: true,
     bold: true,
@@ -112,6 +140,8 @@ test("parsePowerlineConfig validates pill settings", () => {
   assert.deepEqual(config.pillColors, { path: "#123456" });
   assert.equal(config.pillForeground, "#232136");
   assert.deepEqual(config.pillTextColors, { git: "#abcdef" });
+  assert.equal(config.pillIconForeground, "#575279");
+  assert.deepEqual(config.pillIconColors, { git: "#393552" });
   assert.deepEqual(config.pillGroups, [["path", "git"]]);
   assert.equal(config.alwaysShowTokens, true);
   assert.equal(config.bold, true);
@@ -122,7 +152,9 @@ test("invalid pill settings fall back safely", () => {
   const config = parsePowerlineConfig({
     pillBackground: "red",
     pillForeground: "text",
+    pillIconForeground: "muted",
     pillColors: [],
+    pillIconColors: [],
     pillGroups: "path",
     nerdFonts: "yes",
   }, PRESETS);
@@ -130,7 +162,9 @@ test("invalid pill settings fall back safely", () => {
   assert.equal(config.pills, false);
   assert.equal(config.pillBackground, DEFAULT_PILL_BACKGROUND);
   assert.equal(config.pillForeground, "");
+  assert.equal(config.pillIconForeground, "");
   assert.deepEqual(config.pillColors, {});
+  assert.deepEqual(config.pillIconColors, {});
   assert.deepEqual(config.pillGroups, []);
   assert.equal(config.nerdFonts, null);
 });
