@@ -119,11 +119,20 @@ test("buildPillUnits prefers state-aware colors and falls back to the segment co
     [],
     { git: "#111111", gitClean: "#222222", gitDirty: "ansi:9" },
     "#000000",
+    { git: "ansi:0", gitClean: "default", gitDirty: "ansi:0" },
+    "ansi:7",
+    { git: "#333333", gitDirty: "#444444" },
   );
 
   assert.equal(units[0]![0]!.bg, "#222222");
+  assert.equal(units[0]![0]!.fg, "default");
+  assert.equal(units[0]![0]!.iconFg, "#333333");
   assert.equal(units[1]![0]!.bg, "ansi:9");
+  assert.equal(units[1]![0]!.fg, "ansi:0");
+  assert.equal(units[1]![0]!.iconFg, "#444444");
   assert.equal(units[2]![0]!.bg, "#111111");
+  assert.equal(units[2]![0]!.fg, "ansi:0");
+  assert.equal(units[2]![0]!.iconFg, "#333333");
 });
 
 test("buildPillUnits applies default and per-segment icon foregrounds", () => {

@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Added
+- **State-aware pill foregrounds** — State keys such as `gitClean` and `gitDirty` now apply to pill text and icon overrides as well as backgrounds, with the segment key retained as fallback.
 - **State-aware Git pill colors** — Set `pillColors.gitClean` and `pillColors.gitDirty` to give clean and modified repositories distinct pill backgrounds, with `pillColors.git` retained as the fallback.
 - **Terminal-default pill foregrounds** — Set pill text or icon foregrounds to `default` to inherit the terminal theme's default text color without an application color override.
 - **Terminal-palette pill colors** — Pill backgrounds, text, and icons accept `ansi:0` through `ansi:15`, allowing the terminal theme to remain the color source of truth.

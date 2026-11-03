@@ -129,8 +129,10 @@ export function buildPillUnits(
   for (const part of parts) {
     const groupIndex = groupIndexOf(part.id);
     const continuesGroup = groupIndex !== -1 && groupIndex === currentGroup && units.length > 0;
-    const foreground = fgColors[part.id] ?? defaultFg;
-    const iconForeground = foreground ? (iconColors[part.id] ?? defaultIconFg) : "";
+    const stateForeground = part.pillColorKey ? fgColors[part.pillColorKey] : undefined;
+    const foreground = stateForeground ?? fgColors[part.id] ?? defaultFg;
+    const stateIconForeground = part.pillColorKey ? iconColors[part.pillColorKey] : undefined;
+    const iconForeground = foreground ? (stateIconForeground ?? iconColors[part.id] ?? defaultIconFg) : "";
     const segment: PillSegment = {
       id: part.id,
       content: part.content,
