@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Added
+- **Terminal-default pill foregrounds** — Set pill text or icon foregrounds to `default` to inherit the terminal theme's default text color without an application color override.
 - **Terminal-palette pill colors** — Pill backgrounds, text, and icons accept `ansi:0` through `ansi:15`, allowing the terminal theme to remain the color source of truth.
 - **Independent pill icon colors** — Set `powerline.pillIconForeground` or per-segment `pillIconColors` to make leading icons darker or lighter than pill text.
 - **Rounded pill layout** — Set `powerline.pills` to render segments as truecolor capsules with Nerd Font caps, per-segment colors, adjacent segment grouping, optional foreground overrides, bold text, and responsive group-aware overflow.

@@ -33,6 +33,7 @@ function bgAnsi(color: string): string {
 }
 
 function fgAnsi(color: string): string {
+  if (color === "default") return "\x1b[39m";
   const paletteIndex = ansiPaletteIndex(color);
   return paletteIndex === null
     ? ansi.getFgAnsi(...hexToRgb(color))

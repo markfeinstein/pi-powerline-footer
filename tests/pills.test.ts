@@ -38,6 +38,18 @@ test("pill rendering supports terminal ANSI palette colors", () => {
   assert.ok(pill.endsWith(`\x1b[38;5;12m${PILL_RIGHT_CAP}${reset}`));
 });
 
+test("pill rendering supports the terminal-default foreground", () => {
+  const pill = wrapInPillGroup([{
+    content: "icon text",
+    bg: "ansi:12",
+    fg: "default",
+    iconFg: "ansi:8",
+  }]);
+
+  assert.ok(pill.includes("\x1b[38;5;8micon\x1b[39m text"));
+  assert.ok(!pill.includes("\x1b[38;5;15m"));
+});
+
 test("pill rendering reasserts background after embedded resets", () => {
   const content = `\x1b[38;2;1;1;1mA${reset}\x1b[38;2;2;2;2mB${reset}`;
   const pill = wrapInPill(content, "#000000");
@@ -178,6 +190,20 @@ test("parsePowerlineConfig accepts terminal ANSI palette colors", () => {
   assert.deepEqual(config.pillTextColors, { git: "ansi:15" });
   assert.equal(config.pillIconForeground, "ansi:8");
   assert.deepEqual(config.pillIconColors, { git: "ansi:0" });
+});
+
+test("parsePowerlineConfig accepts terminal-default foregrounds", () => {
+  const config = parsePowerlineConfig({
+    pillForeground: "DEFAULT",
+    pillTextColors: { cost: "default" },
+    pillIconForeground: "default",
+    pillIconColors: { git: "default" },
+  }, PRESETS);
+
+  assert.equal(config.pillForeground, "default");
+  assert.deepEqual(config.pillTextColors, { cost: "default" });
+  assert.equal(config.pillIconForeground, "default");
+  assert.deepEqual(config.pillIconColors, { git: "default" });
 });
 
 test("invalid pill settings fall back safely", () => {

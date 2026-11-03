@@ -139,6 +139,22 @@ function normalizePillColorMap(value: unknown): Record<string, string> {
   return colors;
 }
 
+function normalizePillForeground(value: unknown, fallback: string): string {
+  if (typeof value === "string" && value.trim().toLowerCase() === "default") return "default";
+  return normalizePillColor(value, fallback);
+}
+
+function normalizePillForegroundMap(value: unknown): Record<string, string> {
+  if (!isRecord(value)) return {};
+
+  const colors: Record<string, string> = {};
+  for (const [segmentId, rawColor] of Object.entries(value)) {
+    const color = normalizePillForeground(rawColor, "");
+    if (color) colors[segmentId] = color;
+  }
+  return colors;
+}
+
 function normalizePillGroups(value: unknown): string[][] {
   if (!Array.isArray(value)) return [];
 
@@ -459,10 +475,10 @@ export function parsePowerlineConfig(value: unknown, presets: readonly StatusLin
     pills: value.pills === true,
     pillBackground: normalizePillColor(value.pillBackground, DEFAULT_PILL_BACKGROUND),
     pillColors: normalizePillColorMap(value.pillColors),
-    pillForeground: normalizePillColor(value.pillForeground, ""),
-    pillTextColors: normalizePillColorMap(value.pillTextColors),
-    pillIconForeground: normalizePillColor(value.pillIconForeground, ""),
-    pillIconColors: normalizePillColorMap(value.pillIconColors),
+    pillForeground: normalizePillForeground(value.pillForeground, ""),
+    pillTextColors: normalizePillForegroundMap(value.pillTextColors),
+    pillIconForeground: normalizePillForeground(value.pillIconForeground, ""),
+    pillIconColors: normalizePillForegroundMap(value.pillIconColors),
     pillGroups: normalizePillGroups(value.pillGroups),
     alwaysShowTokens: value.alwaysShowTokens === true,
     bold: value.bold === true,
