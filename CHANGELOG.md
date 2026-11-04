@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Added
+- **Named terminal pill colors** — Use `terminal:background`, `terminal:foreground`, standard terminal color names, or `terminal:bright-*` variants so pills inherit the active terminal palette without copying RGB values. Terminal-background text uses reverse video for palette-native contrast.
 - **Process-local pill foreground** — Set `POWERLINE_PILL_FOREGROUND` to a validated hex, ANSI palette, or `default` value when a launcher needs to select foreground ink for the active terminal appearance.
 - **State-aware pill foregrounds** — State keys such as `gitClean` and `gitDirty` now apply to pill text and icon overrides as well as backgrounds, with the segment key retained as fallback.
 - **State-aware Git pill colors** — Set `pillColors.gitClean` and `pillColors.gitDirty` to give clean and modified repositories distinct pill backgrounds, with `pillColors.git` retained as the fallback.

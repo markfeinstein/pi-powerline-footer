@@ -1,6 +1,6 @@
 // Pill rendering: wrap status segments in rounded half-circle caps with a
 // solid background fill. Rounded caps require a Nerd Font. Colors may use
-// truecolor hex values or the terminal's 16-color ANSI palette.
+// truecolor hex values, ANSI palette indexes, or named terminal color slots.
 import { ansi } from "./colors.ts";
 
 /** Left rounded cap (nf-ple-left_half_circle_thick, U+E0B6). */
@@ -10,10 +10,35 @@ export const PILL_RIGHT_CAP = "\uE0B4";
 
 /** Default pill background when none is configured. */
 export const DEFAULT_PILL_BACKGROUND = "#3b4252";
+export const TERMINAL_BACKGROUND = "terminal:background";
+export const TERMINAL_FOREGROUND = "terminal:foreground";
+
+const TERMINAL_PALETTE_INDEX: Readonly<Record<string, number>> = {
+  "terminal:black": 0,
+  "terminal:red": 1,
+  "terminal:green": 2,
+  "terminal:yellow": 3,
+  "terminal:blue": 4,
+  "terminal:magenta": 5,
+  "terminal:cyan": 6,
+  "terminal:white": 7,
+  "terminal:bright-black": 8,
+  "terminal:bright-red": 9,
+  "terminal:bright-green": 10,
+  "terminal:bright-yellow": 11,
+  "terminal:bright-blue": 12,
+  "terminal:bright-magenta": 13,
+  "terminal:bright-cyan": 14,
+  "terminal:bright-white": 15,
+};
+
+export function isTerminalPaletteColor(color: string): boolean {
+  return Object.hasOwn(TERMINAL_PALETTE_INDEX, color);
+}
 
 function ansiPaletteIndex(color: string): number | null {
   const match = /^ansi:([0-9]|1[0-5])$/.exec(color);
-  return match ? Number.parseInt(match[1]!, 10) : null;
+  return match ? Number.parseInt(match[1]!, 10) : (TERMINAL_PALETTE_INDEX[color] ?? null);
 }
 
 function hexToRgb(hex: string): [number, number, number] {
@@ -26,6 +51,7 @@ function hexToRgb(hex: string): [number, number, number] {
 }
 
 function bgAnsi(color: string): string {
+  if (color === TERMINAL_BACKGROUND) return "\x1b[49m";
   const paletteIndex = ansiPaletteIndex(color);
   return paletteIndex === null
     ? ansi.getBgAnsi(...hexToRgb(color))
@@ -33,7 +59,7 @@ function bgAnsi(color: string): string {
 }
 
 function fgAnsi(color: string): string {
-  if (color === "default") return "\x1b[39m";
+  if (color === "default" || color === TERMINAL_FOREGROUND) return "\x1b[39m";
   const paletteIndex = ansiPaletteIndex(color);
   return paletteIndex === null
     ? ansi.getFgAnsi(...hexToRgb(color))
@@ -94,17 +120,34 @@ export function wrapInPillGroup(items: readonly PillSegment[], bold = false): st
 
   const reset = ansi.reset;
   const boldAnsi = bold ? "\x1b[1m" : "";
-  let output = `${fgAnsi(items[0]!.bg)}${PILL_LEFT_CAP}${reset}`;
+  const leftBackground = items[0]!.bg;
+  let output = leftBackground === TERMINAL_BACKGROUND
+    ? ""
+    : `${fgAnsi(leftBackground)}${PILL_LEFT_CAP}${reset}`;
 
   for (const item of items) {
+    const leadingSpace = item.leadingSpace ? " " : "";
+    const trailingSpace = item.trailingSpace === false ? "" : " ";
+    if (item.fg === TERMINAL_BACKGROUND) {
+      if (item.bg === TERMINAL_BACKGROUND) {
+        output += `${reset}\x1b[49;39m${boldAnsi}${leadingSpace}${stripSgr(item.content)}${trailingSpace}${reset}`;
+      } else {
+        output += `${reset}${fgAnsi(item.bg)}${boldAnsi}\x1b[7m${leadingSpace}${stripSgr(item.content)}${trailingSpace}\x1b[27m${reset}`;
+      }
+      continue;
+    }
+
     const background = bgAnsi(item.bg);
     const body = item.fg
       ? `${boldAnsi}${coloredPillBody(item.content, item.fg, item.iconFg)}`
       : item.content.split(reset).join(`${reset}${background}${boldAnsi}`);
-    output += `${background}${item.leadingSpace ? " " : ""}${boldAnsi}${body}${item.trailingSpace === false ? "" : " "}`;
+    output += `${background}${leadingSpace}${boldAnsi}${body}${trailingSpace}`;
   }
 
-  output += `${reset}${fgAnsi(items[items.length - 1]!.bg)}${PILL_RIGHT_CAP}${reset}`;
+  const rightBackground = items[items.length - 1]!.bg;
+  output += rightBackground === TERMINAL_BACKGROUND
+    ? reset
+    : `${reset}${fgAnsi(rightBackground)}${PILL_RIGHT_CAP}${reset}`;
   return output;
 }
 

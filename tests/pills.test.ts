@@ -50,6 +50,42 @@ test("pill rendering supports the terminal-default foreground", () => {
   assert.ok(!pill.includes("\x1b[38;5;15m"));
 });
 
+test("pill rendering supports named terminal palette colors", () => {
+  const pill = wrapInPillGroup([{
+    content: "model",
+    bg: "terminal:bright-magenta",
+    fg: "terminal:foreground",
+  }]);
+
+  assert.ok(pill.startsWith(`\x1b[38;5;13m${PILL_LEFT_CAP}${reset}`));
+  assert.ok(pill.includes("\x1b[48;5;13m"));
+  assert.ok(pill.includes("\x1b[39mmodel"));
+  assert.ok(pill.endsWith(`\x1b[38;5;13m${PILL_RIGHT_CAP}${reset}`));
+});
+
+test("terminal background ink uses reverse video over a named pill color", () => {
+  const pill = wrapInPillGroup([{
+    content: "model",
+    bg: "terminal:bright-magenta",
+    fg: "terminal:background",
+  }]);
+
+  assert.ok(pill.includes(`${reset}\x1b[38;5;13m\x1b[7mmodel \x1b[27m${reset}`));
+  assert.ok(!pill.includes("\x1b[48;5;13m"));
+});
+
+test("terminal background pills use the default background without colored caps", () => {
+  const pill = wrapInPillGroup([{
+    content: "queue",
+    bg: "terminal:background",
+    fg: "terminal:foreground",
+  }]);
+
+  assert.ok(!pill.includes(PILL_LEFT_CAP));
+  assert.ok(!pill.includes(PILL_RIGHT_CAP));
+  assert.ok(pill.includes("\x1b[49m\x1b[39mqueue"));
+});
+
 test("pill rendering reasserts background after embedded resets", () => {
   const content = `\x1b[38;2;1;1;1mA${reset}\x1b[38;2;2;2;2mB${reset}`;
   const pill = wrapInPill(content, "#000000");
@@ -218,6 +254,24 @@ test("parsePowerlineConfig accepts terminal ANSI palette colors", () => {
   assert.deepEqual(config.pillIconColors, { git: "ansi:0" });
 });
 
+test("parsePowerlineConfig accepts named terminal colors", () => {
+  const config = parsePowerlineConfig({
+    pillBackground: "TERMINAL:BACKGROUND",
+    pillColors: { model: "terminal:bright-magenta", bad: "terminal:purple" },
+    pillForeground: "terminal:foreground",
+    pillTextColors: { model: "terminal:background" },
+    pillIconForeground: "terminal:background",
+    pillIconColors: { model: "terminal:background" },
+  }, PRESETS);
+
+  assert.equal(config.pillBackground, "terminal:background");
+  assert.deepEqual(config.pillColors, { model: "terminal:bright-magenta" });
+  assert.equal(config.pillForeground, "terminal:foreground");
+  assert.deepEqual(config.pillTextColors, { model: "terminal:background" });
+  assert.equal(config.pillIconForeground, "");
+  assert.deepEqual(config.pillIconColors, {});
+});
+
 test("parsePowerlineConfig accepts terminal-default foregrounds", () => {
   const config = parsePowerlineConfig({
     pillForeground: "DEFAULT",
@@ -236,6 +290,9 @@ test("process-local pill foreground overrides are validated", () => {
   assert.equal(resolvePillForeground("ansi:0", "#1f1d2d"), "#1f1d2d");
   assert.equal(resolvePillForeground("ansi:0", "ANSI:7"), "ansi:7");
   assert.equal(resolvePillForeground("ansi:0", "DEFAULT"), "default");
+  assert.equal(resolvePillForeground("ansi:0", "terminal:foreground"), "terminal:foreground");
+  assert.equal(resolvePillForeground("ansi:0", "terminal:background"), "terminal:background");
+  assert.equal(resolvePillForeground("ansi:0", "terminal:bright-magenta"), "terminal:bright-magenta");
   assert.equal(resolvePillForeground("ansi:0", "surface"), "ansi:0");
   assert.equal(resolvePillForeground("ansi:0", null), "ansi:0");
 });

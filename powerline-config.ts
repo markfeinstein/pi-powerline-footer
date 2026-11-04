@@ -1,6 +1,11 @@
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { normalizeCostCurrency } from "./currency-rates.ts";
-import { DEFAULT_PILL_BACKGROUND } from "./pills.ts";
+import {
+  DEFAULT_PILL_BACKGROUND,
+  isTerminalPaletteColor,
+  TERMINAL_BACKGROUND,
+  TERMINAL_FOREGROUND,
+} from "./pills.ts";
 import { BUILTIN_STATUS_LINE_SEGMENT_IDS } from "./types.ts";
 import type { ColorValue, CustomItemPosition, CustomStatusItem, PowerlinePlacement, PresetDef, StatusLineLayout, StatusLinePreset, StatusLineSegmentId, StatusLineSegmentOptions, StatusLineSeparatorStyle } from "./types.ts";
 
@@ -125,7 +130,11 @@ function normalizePillColor(value: unknown, fallback: string): string {
   const color = value.trim();
   if (HEX_COLOR.test(color)) return color;
   const normalized = color.toLowerCase();
-  return ANSI_PALETTE_COLOR.test(normalized) ? normalized : fallback;
+  return ANSI_PALETTE_COLOR.test(normalized)
+      || normalized === TERMINAL_BACKGROUND
+      || isTerminalPaletteColor(normalized)
+    ? normalized
+    : fallback;
 }
 
 function normalizePillColorMap(value: unknown): Record<string, string> {
@@ -140,7 +149,10 @@ function normalizePillColorMap(value: unknown): Record<string, string> {
 }
 
 function normalizePillForeground(value: unknown, fallback: string): string {
-  if (typeof value === "string" && value.trim().toLowerCase() === "default") return "default";
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+    if (normalized === "default" || normalized === TERMINAL_FOREGROUND) return normalized;
+  }
   return normalizePillColor(value, fallback);
 }
 
@@ -158,6 +170,22 @@ function normalizePillForegroundMap(value: unknown): Record<string, string> {
   const colors: Record<string, string> = {};
   for (const [segmentId, rawColor] of Object.entries(value)) {
     const color = normalizePillForeground(rawColor, "");
+    if (color) colors[segmentId] = color;
+  }
+  return colors;
+}
+
+function normalizePillIconForeground(value: unknown, fallback: string): string {
+  const color = normalizePillForeground(value, fallback);
+  return color === TERMINAL_BACKGROUND ? fallback : color;
+}
+
+function normalizePillIconForegroundMap(value: unknown): Record<string, string> {
+  if (!isRecord(value)) return {};
+
+  const colors: Record<string, string> = {};
+  for (const [segmentId, rawColor] of Object.entries(value)) {
+    const color = normalizePillIconForeground(rawColor, "");
     if (color) colors[segmentId] = color;
   }
   return colors;
@@ -485,8 +513,8 @@ export function parsePowerlineConfig(value: unknown, presets: readonly StatusLin
     pillColors: normalizePillColorMap(value.pillColors),
     pillForeground: normalizePillForeground(value.pillForeground, ""),
     pillTextColors: normalizePillForegroundMap(value.pillTextColors),
-    pillIconForeground: normalizePillForeground(value.pillIconForeground, ""),
-    pillIconColors: normalizePillForegroundMap(value.pillIconColors),
+    pillIconForeground: normalizePillIconForeground(value.pillIconForeground, ""),
+    pillIconColors: normalizePillIconForegroundMap(value.pillIconColors),
     pillGroups: normalizePillGroups(value.pillGroups),
     alwaysShowTokens: value.alwaysShowTokens === true,
     bold: value.bold === true,
